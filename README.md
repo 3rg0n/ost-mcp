@@ -3,13 +3,14 @@
 Query an Outlook mailbox file over MCP, in place.
 
 ```text
-model  <-->  ost-mcp (MCP stdio + DuckDB)  <-->  .ost
+model  <-->  ost-mcp (MCP stdio + DuckDB)  <-->  .ost / Outlook.sqlite
 ```
 
-Point it at an `.ost` or `.pst` and a model can search it with SQL, read message
-bodies, and pull attachment payloads. Nothing is exported, converted or indexed:
-DuckDB table functions read the file as each query runs, the mapping is read-only,
-and **Outlook can stay open** while you query.
+Point it at an `.ost`, a `.pst`, or a Mac Outlook profile, and a model can search
+it with SQL, read message bodies, and pull attachment payloads. Nothing is
+exported, converted or indexed: DuckDB table functions read the store as each
+query runs, the mapping is read-only, and **Outlook can stay open** while you
+query.
 
 It is a single binary in pure Rust with the DuckDB amalgamation compiled in, so
 there is nothing to install alongside it.
@@ -36,15 +37,17 @@ The binary lands at `target/release/ost-mcp`.
 ## Use
 
 ```sh
-ost-mcp                          # serve MCP over stdio on the profile's store
-ost-mcp <file.ost>               # serve MCP on a named store
-ost-mcp [file.ost] --sql "..."   # run one query, print JSON, exit
-ost-mcp --list                   # list the stores in the Outlook profiles
+ost-mcp                          # serve MCP over stdio on the discovered store
+ost-mcp <file.ost>               # serve MCP on a named OST/PST
+ost-mcp <profile Data dir>       # serve MCP on a named Mac Outlook profile
+ost-mcp [store] --sql "..."      # run one query, print JSON, exit
+ost-mcp --list                   # list the stores that were discovered
 ```
 
-With no argument the store is resolved from the Outlook profile registry —
-`DefaultProfile` first — rather than guessed from a filename or picked by
-directory scan. `--list` shows which profile and account each store belongs to.
+With no argument, the store is resolved from the Outlook profile registry on
+Windows (`DefaultProfile` first) or from the Outlook group container on macOS —
+rather than guessed from a filename or picked by directory scan. `--list` shows
+which profile and account each store belongs to.
 
 ```sh
 $ ost-mcp --sql "SELECT folder_path, count(*) FROM messages GROUP BY 1 ORDER BY 2 DESC LIMIT 3"
@@ -69,7 +72,7 @@ Add the store path as an argument if you want a specific one:
 
 | Tool | What it does |
 |---|---|
-| `store_info` | Path, format version, size, folder count, schema |
+| `store_info` | Path, backend kind, folder count, schema |
 | `list_folders` | The folder tree with item and unread counts |
 | `search` | Messages by text, folder, date range, attachment presence |
 | `sql` | One read-only statement, for anything `search` cannot express |
@@ -122,15 +125,33 @@ Known limits:
   map is not parsed yet.
 - **Torn pages are not retried.** Outlook writes while you read and every page
   carries a CRC, so this is detectable, but validation is not wired up.
-- **Windows only** for now. Store discovery reads the Outlook profile registry,
-  and Mac Outlook does not use OST files at all — it keeps `.olk15*` plus
-  `Outlook.sqlite`, which is a different reader.
+
+**Mac Outlook** (`Outlook.sqlite` + `.olk15*`, `docs/mac-outlook-format.md`):
+
+- **Only reads what the classic engine actually cached locally.** "New
+  Outlook" routes mail content for at least Exchange/M365 accounts through an
+  undocumented proprietary store (`HxStore.hxd`) this reader does not — and,
+  per available evidence, cannot reasonably — read. On such an account
+  `folders` and `messages` come back empty rather than guessed.
+- **Message bodies come from `.olk15Message` only.** `.olk15MsgSource` (the
+  higher-fidelity, full-RFC822 file some messages get) is located but not
+  parsed yet — that needs a real MIME parser validated against a populated
+  profile, which this project does not have.
+- **Recipients are not populated.** `Mail` carries flat recipient-address-list
+  columns, not a structured table, and the delimiter/encoding has not been
+  measured against a real row.
+- **Folder names for the standard special folders (Inbox, Sent Items, …) are
+  inferred from a measured type code, not read verbatim** — Outlook itself
+  writes a literal placeholder string into `Folder_Name` on an account whose
+  classic engine holds no real folder data, and that string is never surfaced.
 
 ## Safety
 
-Read-only by construction: the file is mapped without write access and there is no
-code path that writes to a store. It is still your mail — a model with this server
-attached can read every message in the mailbox, so attach it deliberately.
+Read-only by construction: an OST/PST is memory-mapped without write access, a Mac
+profile's `Outlook.sqlite` is opened with SQLite's read-only flag, and neither
+backend has a code path that writes to a store. It is still your mail — a model
+with this server attached can read every message in the mailbox, so attach it
+deliberately.
 
 ## License
 

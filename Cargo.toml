@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ost", "crates/ost-mcp"]
+members = ["crates/mailbox", "crates/ost", "crates/mac-outlook", "crates/ost-mcp"]
 exclude = ["spike"]
 
 [workspace.package]
@@ -24,3 +24,5 @@ base64 = "0.23.1"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-std"] }
 # Reads the Outlook profile keys that name the store; Windows-only by nature.
 windows-registry = "0.6.1"
+# Bundled so the binary has no system SQLite dependency, same as `duckdb`.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
