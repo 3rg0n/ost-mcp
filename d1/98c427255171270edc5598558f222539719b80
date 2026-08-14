@@ -1,0 +1,34 @@
+Cargo.toml
+  s_3df99e4adc7c89::t_dea3670ea8627a 25-26
+crates/ost-mcp/Cargo.toml
+  s_3df99e4adc7c89::t_ad812ba6c8c3b6 18
+  s_3df99e4adc7c89::t_fb9ba1464e30d9 16-17
+CHANGELOG.md
+  s_3df99e4adc7c89::t_041e9338ea4a17 14-16
+docs/ost-v36-format.md
+  s_3df99e4adc7c89::t_98a1f83c096012 320-350
+crates/ost-mcp/src/discover.rs
+  s_3df99e4adc7c89::t_f2a9ab99b78b52 3-22,24,27-53,59-81,84,86-87,89-90,93-208
+crates/ost-mcp/src/main.rs
+  s_3df99e4adc7c89::t_f047715037492b 48-55,62-65
+  s_3df99e4adc7c89::t_134b7891e6bf95 14
+  s_3df99e4adc7c89::t_16e4edbef36dbe 86
+Cargo.lock
+  s_3df99e4adc7c89::t_e49b91dcc33028 965,1710-1720
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.22",
+  "base_commit_sha": "d198c427255171270edc5598558f222539719b80",
+  "prompts": {},
+  "sessions": {
+    "s_3df99e4adc7c89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4f4ec95a-7479-476e-b36c-ef03eb0b1d1b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ergon Copeland <62959009+3rg0n@users.noreply.github.com>"
+    }
+  }
+}
