@@ -11,7 +11,7 @@
 //!
 //! Usage:
 //! ```text
-//! ost-mcp                          # serve stdio MCP on the discovered store
+//! ost-mcp                          # serve stdio MCP on the profile's store
 //! ost-mcp <file.ost>               # serve stdio MCP on a named store
 //! ost-mcp [file.ost] --sql "..."   # run one query and print JSON, then exit
 //! ost-mcp --list                   # show the stores that were discovered
@@ -45,18 +45,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if list {
-        let dir = discover::default_dir().ok_or("LOCALAPPDATA is not set")?;
-        for p in discover::candidates_in(&dir) {
-            let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-            println!("{:>14}  {}", bytes, p.display());
+        for f in discover::stores() {
+            println!(
+                "{:>14}  {:<18}  {:<24}  {}",
+                f.bytes,
+                f.source,
+                f.account.unwrap_or_default(),
+                f.path.display()
+            );
         }
         return Ok(());
     }
 
     let path = match path {
         Some(p) => std::path::PathBuf::from(p),
-        None => discover::primary()
-            .ok_or("no .ost or .pst found; pass one as an argument (try --list)")?,
+        None => discover::primary().ok_or(
+            "no .ost or .pst in any Outlook profile or in the Outlook directory; \
+             pass one as an argument (try --list)",
+        )?,
     };
     let store = Arc::new(Store::open(&path)?);
     let conn = open_db(&store)?;
@@ -77,7 +83,7 @@ ost-mcp — query an Outlook OST/PST over MCP
 
   ost-mcp [<file.ost>]              serve MCP over stdio
   ost-mcp [<file.ost>] --sql <sql>  run one read-only query, print JSON
-  ost-mcp --list                    list discovered stores
+  ost-mcp --list                    list the stores in the Outlook profiles
 ";
 
 /// An in-memory DuckDB with the store's table functions registered.

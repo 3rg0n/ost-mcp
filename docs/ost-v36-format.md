@@ -317,6 +317,37 @@ cache page offsets across sessions), and treat a lookup miss as "the file moved
 under me," not as corruption. Every page carries `dwCRC`, so torn reads are
 detectable — validate and retry.
 
+### Locating the store
+
+The filename is not derivable. It is usually the account UPN plus `.ost`, but the
+profile is the only authority, and the same directory holds a `.nst` Groups store
+with the same stem — so guessing the name, or scanning for the largest file, both
+pick the wrong thing on some machines.
+
+Outlook writes the path it opened into the profile registry:
+
+```text
+HKCU\Software\Microsoft\Office\<ver>\Outlook
+  DefaultProfile                = REG_SZ, the profile Outlook opens
+  Profiles\<profile>\<service>
+    001f6610                    = REG_BINARY, UTF-16 store path
+    001f3001                    = REG_BINARY, UTF-16 account display name
+```
+
+`001f6610` is `PR_PROFILE_OFFLINE_STORE_PATH` and holds the OST for a cached
+Exchange mailbox. Two things measured here contradict what the MAPI docs imply:
+
+- **The strings are `REG_BINARY`, not `REG_SZ`** — NUL-terminated UTF-16, 146
+  bytes for a 72-character path. A reader expecting `REG_SZ` finds nothing.
+- **`<service>` is an opaque key name**, `507bb8f9…` on this machine, not the
+  documented `9375CFF0413111d3B88A00104B2A6676\0000000x`. Both key shapes exist in
+  the same profile, so the subtree has to be walked rather than indexed into.
+
+The Groups store appears as `001f6610` too, on a `GroupsStore` subkey one level
+below the mailbox service, pointing at a `.nst`. Filtering on the `.ost`/`.pst`
+extension excludes it and also picks up added PSTs whatever tag they are filed
+under, which avoids having to enumerate tag numbers at all.
+
 ## Verified end to end
 
 A spike (`spike/src/main.rs`) reads the live 4.32 GB OST with Outlook running and

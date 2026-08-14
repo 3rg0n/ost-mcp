@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ost-mcp` serves an Outlook OST/PST over MCP with seven tools, reading the file in
   place through DuckDB table functions — no export, no index, and no need to close
   Outlook first.
+- The store to open is resolved from the Outlook profile registry, so `ost-mcp`
+  needs no path argument and `--list` reports which profile and account each store
+  belongs to; scanning the Outlook directory is now only a fallback.
 - Support for the undocumented OST format version 36 written by Outlook 2013 and
   later: 4 KB pages, widened BTree page counts, and zlib-compressed block payloads
   (`docs/ost-v36-format.md`).
