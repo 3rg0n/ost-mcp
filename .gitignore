@@ -1,0 +1,34 @@
+/target
+**/target
+
+# Mailbox files and anything dumped out of one. These hold personal mail, sender
+# addresses and attachment payloads; nothing derived from a real store belongs in
+# the repo.
+*.ost
+*.pst
+*.olm
+*.olk15*
+*.eml
+*.msg
+dump*.txt
+run*.txt
+
+# The reverse-engineering scratch binary, superseded by crates/ost. Excluded from
+# the workspace and it prints real mailbox content.
+/spike
+
+# Secrets and local config
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+.mcp.json.local
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

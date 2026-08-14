@@ -1,0 +1,11 @@
+[package]
+name = "ost"
+description = "Read-only reader for Outlook OST/PST (PFF) stores, including the undocumented v36 4 KB-page OST variant"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+memmap2 = { workspace = true }
+flate2 = { workspace = true }
+compressed-rtf = { workspace = true }
