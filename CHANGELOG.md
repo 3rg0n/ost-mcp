@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for the undocumented OST format version 36 written by Outlook 2013 and
   later: 4 KB pages, widened BTree page counts, and zlib-compressed block payloads
   (`docs/ost-v36-format.md`).
+- A bundled Claude Code skill (`skills/ost-mcp/SKILL.md`) drives the binary from the
+  shell, so a model can query the mailbox without an MCP server registration.
+- Every MCP tool now has a command-line flag that prints the same JSON and exits:
+  `--info`, `--message`, `--attachments` and `--attachment` join `--sql`, which
+  already covered folder listing and search.
+- `--attachment <msg>:<att> --out <path>` writes an attachment's bytes to a file,
+  which base64 through a terminal cannot usefully do.
 
 ### Fixed
 - `messages.sender_name` and `messages.sender_email` now come from
