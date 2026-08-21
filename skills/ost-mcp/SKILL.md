@@ -1,33 +1,37 @@
 ---
 name: ost-mcp
-description: Query the local Outlook mailbox file (.ost/.pst) in place with SQL, read message bodies, and extract attachments. Use for any question about the user's own email — find or count messages by sender, folder, subject or date, see what arrived recently, check unread counts, or pull a file off a message. Needs the ost-mcp binary; Windows only.
+description: Query the local Outlook mailbox (an .ost/.pst file on Windows, or a Mac Outlook profile) in place with SQL, read message bodies, and extract attachments. Use for any question about the user's own email — find or count messages by sender, folder, subject or date, see what arrived recently, check unread counts, or pull a file off a message. Needs the ost-mcp binary.
 ---
 
 # ost-mcp
 
-Reads an Outlook `.ost`/`.pst` **as a file**. No Graph API, no OAuth, no COM, and
-Outlook does not need to be running. The mailbox is memory-mapped read-only and
-queried by an embedded DuckDB as each query runs, so nothing is exported or
-indexed first.
+Reads an Outlook mailbox **in place** — an `.ost`/`.pst` file on Windows, or a
+Mac Outlook profile (`Outlook.sqlite` + `.olk15*` + `HxStore.hxd`) on macOS. No
+Graph API, no OAuth, no COM/AppleScript, and Outlook does not need to be
+running. The store is read read-only and queried by an embedded DuckDB as each
+query runs, so nothing is exported or indexed first.
 
 Every command below prints one JSON document to stdout and exits.
 
 ## Resolve the binary
 
-Use `ost-mcp` if it is on `PATH`. Otherwise use `$env:OST_MCP_BIN`. If neither
-resolves, stop and tell the user to run `cargo install --path crates/ost-mcp`
-from a clone of `github.com/3rg0n/ost-mcp` — do not guess at a path.
+Use `ost-mcp` if it is on `PATH`. Otherwise use `$env:OST_MCP_BIN` (or
+`$OST_MCP_BIN` on macOS/Linux). If neither resolves, stop and tell the user to
+run `cargo install --path crates/ost-mcp` from a clone of
+`github.com/3rg0n/ost-mcp` — do not guess at a path.
 
-With no file argument the store is resolved from the Outlook profile registry,
-so a plain `ost-mcp --info` normally works. Pass a path as the first argument to
-read a specific file, such as an archive `.pst`.
+With no file argument the store is resolved from the Outlook profile registry
+on Windows or the Outlook group container on macOS, so a plain `ost-mcp --info`
+normally works. Pass a path as the first argument to read a specific store — an
+`.ost`/`.pst` file, or a Mac profile's `Data` directory (or its
+`Outlook.sqlite` file, or the identity directory above it).
 
 ## Commands
 
 | Command | Returns |
 |---|---|
 | `ost-mcp --list` | every store found, with its profile and account |
-| `ost-mcp --info` | path, format version, size, folder count, schema |
+| `ost-mcp --info` | path, backend kind, folder count, schema |
 | `ost-mcp --sql "<query>"` | rows as JSON — the main tool |
 | `ost-mcp --message <nid>` | one message: headers, recipients, body, attachment list |
 | `ost-mcp --attachments <nid>` | attachment metadata for a message, no payloads |
@@ -128,5 +132,11 @@ ost-mcp --attachment 24295876:24277637 --out "$env:TEMP\report.pdf"
   implemented. Cached Exchange OSTs are usually unencrypted; a PST often is not.
 - **Named properties (0x8000 and above) are not resolved**, so custom and some
   Outlook-specific fields are absent.
-- **Windows only.** Mac Outlook keeps no OST — it uses `Outlook.sqlite` plus
-  `.olk15*` files, which is a different reader and not built yet.
+- **On a Mac profile, message ids can be negative.** Messages recovered from
+  `HxStore.hxd` (New Outlook's local cache) get synthetic negative `nid`s and
+  sit in one "Recovered Mail (Hx cache)" folder, since that source carries no
+  real folder identity or attachment linkage — `list_attachments` on one of
+  those ids is correctly always empty, not a bug.
+- **A Mac profile's classic-engine folders can show a real name for the
+  standard special folders even though `Outlook.sqlite` stores a literal
+  placeholder string** — that is intentional, see `docs/mac-outlook-format.md`.

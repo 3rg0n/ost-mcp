@@ -3,13 +3,14 @@
 Query an Outlook mailbox file over MCP, in place.
 
 ```text
-model  <-->  ost-mcp (MCP stdio + DuckDB)  <-->  .ost
+model  <-->  ost-mcp (MCP stdio + DuckDB)  <-->  .ost / Outlook.sqlite
 ```
 
-Point it at an `.ost` or `.pst` and a model can search it with SQL, read message
-bodies, and pull attachment payloads. Nothing is exported, converted or indexed:
-DuckDB table functions read the file as each query runs, the mapping is read-only,
-and **Outlook can stay open** while you query.
+Point it at an `.ost`, a `.pst`, or a Mac Outlook profile, and a model can search
+it with SQL, read message bodies, and pull attachment payloads. Nothing is
+exported, converted or indexed: DuckDB table functions read the store as each
+query runs, the mapping is read-only, and **Outlook can stay open** while you
+query.
 
 It is a single binary in pure Rust with the DuckDB amalgamation compiled in, so
 there is nothing to install alongside it.
@@ -24,7 +25,7 @@ reads a Parquet file rather than loading it.
 
 ## Install
 
-One line, in PowerShell:
+**Windows**, one line, in PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1 | iex
@@ -78,19 +79,20 @@ Install ost-mcp on this Windows machine and confirm it works.
 
 4. Check all three, and report the actual output of each:
    - `ost-mcp --list` names at least one .ost or .pst
-   - `ost-mcp --info` prints a format version and a folder count
+   - `ost-mcp --info` prints a backend kind and a folder count
    - the file ~/.claude/skills/ost-mcp/SKILL.md exists
 
 5. Then tell me to restart my Claude Code session so the skill loads.
 
 This tool reads my real mailbox, read-only. While you check the install, do not
 print, quote or save a subject line, a sender address or any message body. Counts,
-the format version and the file size are the only evidence you need.
+the backend kind and the folder count are the only evidence you need.
 ```
 
-### From source
+### From source (macOS, Linux, or Windows without the installer)
 
-Needs a Rust toolchain and, on Windows, the MSVC build tools.
+**macOS is source-only for now** — there is no installer script yet, only
+`cargo`. Needs a Rust toolchain and, on Windows, the MSVC build tools.
 
 ```sh
 cargo build --release
@@ -103,15 +105,16 @@ expects.
 ## Use
 
 ```sh
-ost-mcp                                # serve MCP over stdio on the profile's store
-ost-mcp <file.ost>                     # serve MCP on a named store
-ost-mcp --list                         # list the stores in the Outlook profiles
-ost-mcp --info                         # path, format version, size, schema
-ost-mcp --sql "..."                    # run one query, print JSON, exit
-ost-mcp --message <nid>                # one message: headers, recipients, body
-ost-mcp --attachments <nid>            # attachment metadata for a message
-ost-mcp --attachment <msg>:<att>       # one payload, as text or base64
-ost-mcp --attachment <m>:<a> --out f   # write the payload to a file
+ost-mcp                                # serve MCP over stdio on the discovered store
+ost-mcp <file.ost>                     # serve MCP on a named OST/PST
+ost-mcp <profile Data dir>             # serve MCP on a named Mac Outlook profile
+ost-mcp [store] --list                 # list the stores that were discovered
+ost-mcp [store] --info                 # path, backend kind, size, schema
+ost-mcp [store] --sql "..."            # run one query, print JSON, exit
+ost-mcp [store] --message <nid>        # one message: headers, recipients, body
+ost-mcp [store] --attachments <nid>    # attachment metadata for a message
+ost-mcp [store] --attachment <m>:<a>   # one payload, as text or base64
+ost-mcp [store] --attachment <m>:<a> --out f   # write the payload to a file
 ```
 
 Every MCP tool has a flag that prints the same JSON and exits, so the binary is
@@ -119,9 +122,10 @@ usable from a shell or a script without speaking the protocol. `--sql` covers
 folder listing and search on its own, since both are queries over the same two
 tables.
 
-With no argument the store is resolved from the Outlook profile registry —
-`DefaultProfile` first — rather than guessed from a filename or picked by
-directory scan. `--list` shows which profile and account each store belongs to.
+With no argument, the store is resolved from the Outlook profile registry on
+Windows (`DefaultProfile` first) or from the Outlook group container on macOS —
+rather than guessed from a filename or picked by directory scan. `--list` shows
+which profile and account each store belongs to.
 
 ```sh
 $ ost-mcp --sql "SELECT folder_path, count(*) FROM messages GROUP BY 1 ORDER BY 2 DESC LIMIT 3"
@@ -161,7 +165,7 @@ Add the store path as an argument if you want a specific one:
 
 | Tool | What it does | CLI |
 |---|---|---|
-| `store_info` | Path, format version, size, folder count, schema | `--info` |
+| `store_info` | Path, backend kind, folder count, schema | `--info` |
 | `list_folders` | The folder tree with item and unread counts | `--sql` |
 | `search` | Messages by text, folder, date range, attachment presence | `--sql` |
 | `sql` | One read-only statement, for anything `search` cannot express | `--sql` |
@@ -217,15 +221,46 @@ Known limits:
   map is not parsed yet.
 - **Torn pages are not retried.** Outlook writes while you read and every page
   carries a CRC, so this is detectable, but validation is not wired up.
-- **Windows only** for now. Store discovery reads the Outlook profile registry,
-  and Mac Outlook does not use OST files at all — it keeps `.olk15*` plus
-  `Outlook.sqlite`, which is a different reader.
+
+**Mac Outlook** (`Outlook.sqlite` + `.olk15*` + `HxStore.hxd`,
+`docs/mac-outlook-format.md`):
+
+- **Two local stores, read together.** `Outlook.sqlite` + `.olk15*` (the
+  classic engine) supplies folder, category and signature structure.
+  `HxStore.hxd` — New Outlook's undocumented local cache, independently
+  parsed here — supplies message content for whatever window the account's
+  own sync setting keeps locally (e.g. the last 60 days), for at least
+  Exchange/M365 accounts. Either can be empty on a given account without
+  the other being; both return nothing rather than a guess when they are.
+- **Recovered mail has no folder identity.** `HxStore.hxd` does not tie a
+  message to a specific folder, so every message it supplies is exposed
+  under one synthetic "Recovered Mail (Hx cache)" folder, not sorted into
+  Inbox/Sent/etc.
+- **Recovered mail has no attachment linkage.** A separate plain-file
+  attachment cache exists (`Files/S0/<n>/Attachments/0/*`), but nothing
+  found so far ties one of its files to a specific message.
+- **Recovered mail's sender is sometimes NULL rather than a guess.** When a
+  record's sender metadata sits after the anchor and holds more than one
+  address (a participant's and the true sender's), there is no reliable way
+  yet to tell them apart — see `docs/mac-outlook-format.md` §2.6.1.
+- **Classic-engine message bodies come from `.olk15Message` only.**
+  `.olk15MsgSource` (the higher-fidelity, full-RFC822 file some messages
+  get) is located but not parsed yet — that needs a real MIME parser.
+- **Classic-engine recipients are not populated.** `Mail` carries flat
+  recipient-address-list columns, not a structured table, and the
+  delimiter/encoding has not been measured against a real row.
+- **Classic-engine folder names for the standard special folders (Inbox,
+  Sent Items, …) are inferred from a measured type code, not read
+  verbatim** — Outlook itself writes a literal placeholder string into
+  `Folder_Name` on an account whose classic engine holds no real folder
+  data, and that string is never surfaced.
 
 ## Safety
 
-Read-only by construction: the file is mapped without write access and there is no
-code path that writes to a store. `--attachment --out` is the only thing that
-writes anywhere, and it writes one payload to the path you name.
+Read-only by construction: an OST/PST is memory-mapped without write access, a Mac
+profile's `Outlook.sqlite` is opened with SQLite's read-only flag, and neither
+backend has a code path that writes to a store. `--attachment --out` is the only
+thing that writes anywhere, and it writes one payload to the path you name.
 
 It is still your mail — a model with this server or skill attached can read every
 message in the mailbox, so attach it deliberately.

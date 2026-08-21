@@ -1,9 +1,16 @@
-//! The MCP surface: seven tools over one mounted store.
+//! The MCP surface: seven tools over one mounted mailbox.
 //!
-//! Three of them (`list_folders`, `search`, `sql`) go through DuckDB, which reads
-//! the OST through the table functions in [`crate::vtab`]. The other four go
-//! straight to the reader, because a body or an attachment payload is a
-//! single-node read that SQL would only get in the way of.
+//! Three of them (`list_folders`, `search`, `sql`) go through DuckDB, which
+//! reads the mailbox through the table functions in [`crate::vtab`]. The
+//! other four go straight to the [`mailbox::Mailbox`], because a body or an
+//! attachment payload is a single-message read that SQL would only get in
+//! the way of.
+//!
+//! Those four are plain functions (the "reports" section below) rather than
+//! methods on the server, so the CLI flags in `main` produce byte-for-byte
+//! the same JSON as the MCP tool of the same name — one shape, two
+//! transports, and a reply that only one of them can emit is a reply that
+//! drifts.
 //!
 //! Tool bodies are synchronous. They run on the multi-threaded runtime rather
 //! than under `spawn_blocking`: a stdio server has one client, so a slow sweep
@@ -20,9 +27,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use ost::props::format_time_us;
-use ost::Store;
 
 use crate::sql;
+use crate::vtab::MailboxRef;
 
 /// Most tools cap their output; a model does not benefit from 40,000 rows.
 const DEFAULT_LIMIT: usize = 200;
@@ -34,7 +41,7 @@ const DEFAULT_ATTACH_BYTES: usize = 1 << 20;
 
 #[derive(Clone)]
 pub struct OstServer {
-    store: Arc<Store>,
+    store: MailboxRef,
     /// `Connection` is `Send` but not `Sync`, and the handler is shared, so
     /// every query serialises through this lock. Queries are single-threaded
     /// anyway — the table functions set `max_threads` to 1.
@@ -50,6 +57,14 @@ fn internal(e: impl std::fmt::Display) -> ErrorData {
 
 fn bad_request(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::invalid_params(e.to_string(), None)
+}
+
+/// A missing node is the caller's mistake, not the server's.
+fn not_found_or_internal(e: mailbox::Error) -> ErrorData {
+    match e {
+        mailbox::Error::NotFound(msg) => bad_request(msg),
+        other => internal(other),
+    }
 }
 
 fn clamp_limit(limit: Option<usize>) -> usize {
@@ -94,8 +109,8 @@ pub struct FoldersRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MessageRequest {
-    /// Node id, as returned in the `nid` column of `messages`.
-    pub nid: u32,
+    /// Message id, as returned in the `nid` column of `messages`.
+    pub nid: i64,
     /// Characters of body text to return (default 20000). The reply says
     /// whether it was cut.
     pub max_body_chars: Option<usize>,
@@ -103,16 +118,16 @@ pub struct MessageRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct NidRequest {
-    /// Node id, as returned in the `nid` column of `messages`.
-    pub nid: u32,
+    /// Message id, as returned in the `nid` column of `messages`.
+    pub nid: i64,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct AttachmentRequest {
-    /// Node id of the message that owns the attachment.
-    pub message_nid: u32,
-    /// Node id of the attachment, from `list_attachments`.
-    pub attachment_nid: u32,
+    /// Id of the message that owns the attachment.
+    pub message_nid: i64,
+    /// Id of the attachment, from `list_attachments`.
+    pub attachment_nid: i64,
     /// Bytes to return (default 1048576).
     pub max_bytes: Option<usize>,
 }
@@ -123,10 +138,9 @@ pub struct AttachmentRequest {
 pub struct StoreInfo {
     pub path: String,
     pub display_name: Option<String>,
-    /// PFF format version: 23 for a documented PST/OST, 36 for the 4 KB-page
-    /// OST written by Outlook 2013 and later.
-    pub version: u16,
-    pub bytes: u64,
+    /// A short backend tag: `ost-v36`, `ost-v23`, or `mac-olk15`. See
+    /// `docs/adr/0001-mailbox-backend-trait.md`.
+    pub kind: String,
     pub folders: usize,
     pub tables: Vec<String>,
 }
@@ -161,19 +175,19 @@ pub struct RecipientReply {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AttachmentReply {
-    pub nid: u32,
+    pub nid: i64,
     pub filename: Option<String>,
     pub mime: Option<String>,
     pub content_id: Option<String>,
-    pub declared_size: Option<i32>,
-    /// Payload length in bytes, or null when the attachment is an embedded
-    /// message rather than a byte stream.
+    pub declared_size: Option<i64>,
+    /// Payload length in bytes, or null when the backend cannot report one
+    /// without reading the payload.
     pub data_len: Option<usize>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct MessageReply {
-    pub nid: u32,
+    pub nid: i64,
     pub subject: Option<String>,
     pub sender_name: Option<String>,
     pub sender_email: Option<String>,
@@ -182,7 +196,7 @@ pub struct MessageReply {
     pub delivered: Option<String>,
     pub submitted: Option<String>,
     pub modified: Option<String>,
-    pub size: Option<i32>,
+    pub size: Option<i64>,
     pub unread: Option<bool>,
     pub message_class: Option<String>,
     pub internet_message_id: Option<String>,
@@ -200,8 +214,8 @@ pub struct MessageReply {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct AttachmentDataReply {
-    pub message_nid: u32,
-    pub attachment_nid: u32,
+    pub message_nid: i64,
+    pub attachment_nid: i64,
     pub filename: Option<String>,
     pub mime: Option<String>,
     pub total_bytes: usize,
@@ -215,17 +229,15 @@ pub struct AttachmentDataReply {
 
 // -------------------------------------------------------------------- reports
 //
-// These are plain functions rather than methods on the server so that the CLI in
-// `main` produces byte-for-byte the same JSON as the MCP tool of the same name.
-// One shape, two transports — a reply that only one of them can emit is a reply
-// that drifts.
+// Plain functions rather than methods on the server, so the CLI flags in
+// `main` produce byte-for-byte the same JSON as the MCP tool of the same
+// name — see the module doc.
 
-pub fn store_info(store: &Store, path: &str) -> Result<StoreInfo, ost::Error> {
+pub fn store_info(store: &MailboxRef, path: &str) -> Result<StoreInfo, mailbox::Error> {
     Ok(StoreInfo {
         path: path.to_string(),
         display_name: store.display_name(),
-        version: store.pff.ver,
-        bytes: store.pff.len() as u64,
+        kind: store.kind().to_string(),
         folders: store.folders()?.len(),
         tables: vec![
             "folders(nid, parent_nid, name, path, item_count, unread_count, has_subfolders, is_search_folder)".into(),
@@ -236,10 +248,10 @@ pub fn store_info(store: &Store, path: &str) -> Result<StoreInfo, ost::Error> {
 }
 
 pub fn message_report(
-    store: &Store,
-    nid: u32,
+    store: &MailboxRef,
+    nid: i64,
     max_body_chars: Option<usize>,
-) -> Result<MessageReply, ost::Error> {
+) -> Result<MessageReply, mailbox::Error> {
     let m = store.message(nid)?;
 
     let mut available = Vec::new();
@@ -272,7 +284,7 @@ pub fn message_report(
     });
 
     Ok(MessageReply {
-        nid: m.nid,
+        nid: m.id,
         subject: m.subject,
         sender_name: m.sender_name,
         sender_email: m.sender_email,
@@ -308,24 +320,20 @@ pub fn message_report(
     })
 }
 
-pub fn attachment_list(store: &Store, nid: u32) -> Result<Vec<AttachmentReply>, ost::Error> {
-    Ok(store
-        .attachments(nid)?
-        .into_iter()
-        .map(attachment_reply)
-        .collect())
+pub fn attachment_list(store: &MailboxRef, nid: i64) -> Result<Vec<AttachmentReply>, mailbox::Error> {
+    Ok(store.attachments(nid)?.into_iter().map(attachment_reply).collect())
 }
 
 pub fn attachment_data(
-    store: &Store,
-    message_nid: u32,
-    attachment_nid: u32,
+    store: &MailboxRef,
+    message_nid: i64,
+    attachment_nid: i64,
     max_bytes: Option<usize>,
-) -> Result<AttachmentDataReply, ost::Error> {
+) -> Result<AttachmentDataReply, mailbox::Error> {
     let meta = store
         .attachments(message_nid)?
         .into_iter()
-        .find(|a| a.nid == attachment_nid);
+        .find(|a| a.id == attachment_nid);
     let bytes = store.attachment_bytes(message_nid, attachment_nid)?;
 
     let cap = max_bytes.unwrap_or(DEFAULT_ATTACH_BYTES);
@@ -356,17 +364,9 @@ pub fn attachment_data(
 
 // --------------------------------------------------------------------- server
 
-/// A missing node is the caller's mistake, not the server's.
-fn from_ost(e: ost::Error) -> ErrorData {
-    match e {
-        ost::Error::NotFound(msg) => bad_request(msg),
-        other => internal(other),
-    }
-}
-
 #[tool_router]
 impl OstServer {
-    pub fn new(store: Arc<Store>, conn: duckdb::Connection, path: String) -> Self {
+    pub fn new(store: MailboxRef, conn: duckdb::Connection, path: String) -> Self {
         OstServer {
             store,
             conn: Arc::new(Mutex::new(conn)),
@@ -382,8 +382,8 @@ impl OstServer {
             .map_err(internal)
     }
 
-    /// What is mounted: the file, its format version, and the queryable tables.
-    #[tool(description = "Describe the mounted Outlook store: path, format version, size, folder count and the tables available to `sql`.")]
+    /// What is mounted: the path, the backend and the queryable tables.
+    #[tool(description = "Describe the mounted Outlook store: path, backend kind, folder count and the tables available to `sql`.")]
     async fn store_info(&self) -> Result<Json<StoreInfo>, ErrorData> {
         Ok(Json(store_info(&self.store, &self.path).map_err(internal)?))
     }
@@ -467,7 +467,7 @@ impl OstServer {
         Parameters(req): Parameters<MessageRequest>,
     ) -> Result<Json<MessageReply>, ErrorData> {
         Ok(Json(
-            message_report(&self.store, req.nid, req.max_body_chars).map_err(from_ost)?,
+            message_report(&self.store, req.nid, req.max_body_chars).map_err(not_found_or_internal)?,
         ))
     }
 
@@ -477,9 +477,7 @@ impl OstServer {
         &self,
         Parameters(req): Parameters<NidRequest>,
     ) -> Result<Json<Vec<AttachmentReply>>, ErrorData> {
-        Ok(Json(
-            attachment_list(&self.store, req.nid).map_err(from_ost)?,
-        ))
+        Ok(Json(attachment_list(&self.store, req.nid).map_err(not_found_or_internal)?))
     }
 
     /// One attachment's bytes, as text when they are text.
@@ -489,20 +487,15 @@ impl OstServer {
         Parameters(req): Parameters<AttachmentRequest>,
     ) -> Result<Json<AttachmentDataReply>, ErrorData> {
         Ok(Json(
-            attachment_data(
-                &self.store,
-                req.message_nid,
-                req.attachment_nid,
-                req.max_bytes,
-            )
-            .map_err(from_ost)?,
+            attachment_data(&self.store, req.message_nid, req.attachment_nid, req.max_bytes)
+                .map_err(not_found_or_internal)?,
         ))
     }
 }
 
-fn attachment_reply(a: ost::Attachment) -> AttachmentReply {
+fn attachment_reply(a: mailbox::Attachment) -> AttachmentReply {
     AttachmentReply {
-        nid: a.nid,
+        nid: a.id,
         filename: a.filename,
         mime: a.mime,
         content_id: a.content_id,
@@ -514,6 +507,6 @@ fn attachment_reply(a: ost::Attachment) -> AttachmentReply {
 #[tool_handler(
     router = self.tool_router,
     name = "ost-mcp",
-    instructions = "Queries a mounted Outlook OST/PST mailbox file in place. Start with `store_info` for the schema, then `search` or `sql` to find messages and `get_message` to read one. Node ids (`nid`) are the handle for everything: a message's nid comes from a query, an attachment's from `list_attachments`. Nothing is written to the mailbox and nothing is exported to disk."
+    instructions = "Queries a mounted Outlook mailbox (OST/PST, or a Mac Outlook profile) in place. Start with `store_info` for the schema, then `search` or `sql` to find messages and `get_message` to read one. Node ids (`nid`) are the handle for everything: a message's nid comes from a query, an attachment's from `list_attachments`. Nothing is written to the mailbox and nothing is exported to disk."
 )]
 impl ServerHandler for OstServer {}
