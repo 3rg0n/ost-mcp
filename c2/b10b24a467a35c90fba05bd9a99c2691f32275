@@ -1,0 +1,29 @@
+skills/ost-mcp/SKILL.md
+  s_3df99e4adc7c89::t_bd40d70f304ceb 19
+CHANGELOG.md
+  s_3df99e4adc7c89::t_22ea779f0a11ec 62-69
+  s_3df99e4adc7c89::t_d40e65eb619eb1 91-94
+crates/mac-outlook/src/lib.rs
+  s_3df99e4adc7c89::t_a11ab04968dc6f 140-151,153-154,157-159
+install.ps1
+  s_3df99e4adc7c89::t_2c66fd37167904 118
+README.md
+  s_3df99e4adc7c89::t_8e523a65d1b1fc 61-86,89-90,93,95-99,102-104,106-108,111
+  s_3df99e4adc7c89::t_6e6ec7a03a8773 122,124
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "c2b10b24a467a35c90fba05bd9a99c2691f32275",
+  "prompts": {},
+  "sessions": {
+    "s_3df99e4adc7c89": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4f4ec95a-7479-476e-b36c-ef03eb0b1d1b",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Ergon Copeland <62959009+3rg0n@users.noreply.github.com>"
+    }
+  }
+}
