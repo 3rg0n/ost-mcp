@@ -16,7 +16,7 @@ Every command below prints one JSON document to stdout and exits.
 ## Resolve the binary
 
 Use `ost-mcp` if it is on `PATH`. Otherwise use `$env:OST_MCP_BIN` (or
-`$OST_MCP_BIN` on macOS/Linux). If neither resolves, stop and tell the user to
+`$OST_MCP_BIN` on macOS). If neither resolves, stop and tell the user to
 run `cargo install --path crates/ost-mcp` from a clone of
 `github.com/3rg0n/ost-mcp` — do not guess at a path.
 

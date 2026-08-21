@@ -59,10 +59,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the equivalent CLI flags, so the two transports cannot drift apart.
 
 ### Security
-- A Mac profile's `PathToDataFile` value (from `Outlook.sqlite`) is now checked for
-  a `..` component or an absolute path before being joined onto the profile
-  directory, closing an arbitrary-file-read path a corrupted or crafted database
-  row could otherwise trigger through `get_message`/`read_attachment`.
+- A Mac profile's `PathToDataFile` value (from `Outlook.sqlite`) must consist
+  entirely of plain name components before it is joined onto the profile directory,
+  closing an arbitrary-file-read path a corrupted or crafted database row could
+  otherwise trigger through `get_message`/`read_attachment`. The check is not
+  `is_absolute()`, which is false on Windows for a rooted path with no drive such
+  as `/etc/passwd`: joining that onto `C:\dir` yields `C:/etc/passwd`, outside the
+  profile. Rejecting every component that is not a name covers a root, a drive
+  prefix and a `..` on both platforms.
 - `.olk15Message`/`.olk15MsgAttachment` header parsing no longer slices a string at
   an offset computed from a separately case-folded copy of it, which could panic on
   certain non-ASCII input (case-folding can change a character's byte length).
@@ -84,3 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `install.ps1` and `skills/ost-mcp/SKILL.md` no longer refer to the removed
   `StoreInfo.version`/`.bytes` fields; both now report the `kind` string that
   replaced them.
+- The README documents the macOS `curl ... | bash` line and its options, instead of
+  saying macOS is source-only, and the agent prompt covers both platforms. Linux is
+  no longer offered as a target: Outlook does not run on it, so there is no store to
+  read.

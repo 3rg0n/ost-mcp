@@ -137,19 +137,26 @@ impl Profile {
     /// (`docs/mac-outlook-format.md` §3.2).
     ///
     /// `relative` comes straight out of `Outlook.sqlite` — a `PathToDataFile`
-    /// column, not something this reader controls. A `..` component or an
-    /// absolute path is rejected rather than joined: `PathBuf::join` does not
-    /// sanitize either (an absolute argument replaces the base outright), so
-    /// without this check a crafted or corrupted database row would let any
-    /// tool that surfaces a message body or attachment read an arbitrary file
-    /// the process has access to, not just the mailbox.
+    /// column, not something this reader controls. Only plain name components
+    /// are joined: `PathBuf::join` sanitizes nothing, and an absolute or
+    /// root-relative argument replaces the base outright, so without this check
+    /// a crafted or corrupted database row would let any tool that surfaces a
+    /// message body or attachment read an arbitrary file the process has access
+    /// to, not just the mailbox.
+    ///
+    /// The test is "every component is a normal name", not `is_absolute()`.
+    /// `is_absolute()` is false on Windows for a path like `/etc/passwd`, which
+    /// has a root but no drive, and `C:\dir` joined with it yields `C:/etc/passwd`
+    /// — outside the profile. Rejecting anything that is not a name covers a
+    /// root, a drive prefix and a `..` on both platforms.
     fn read_data_file(&self, relative: &str) -> Result<Vec<u8>> {
+        use std::path::Component;
+
         let decoded = percent_decode(relative);
         let rel_path = std::path::Path::new(&decoded);
-        let escapes = rel_path.is_absolute()
-            || rel_path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir));
+        let escapes = rel_path
+            .components()
+            .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir));
         if escapes {
             return Err(Error::Format(format!(
                 "refusing to read outside the profile data directory: {relative:?}"

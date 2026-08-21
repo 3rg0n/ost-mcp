@@ -115,7 +115,7 @@ Write-Step "Checking this machine"
 if ($env:OS -ne 'Windows_NT') {
     Fail "this installer is for Windows." @(
         "On macOS, use install.sh instead:",
-        "curl -fsSL $RawBase/install.sh | sh"
+        "curl -fsSL $RawBase/install.sh | bash"
     )
 }
 Write-Ok "Windows, PowerShell $($PSVersionTable.PSVersion)"

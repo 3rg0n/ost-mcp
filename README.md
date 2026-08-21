@@ -58,27 +58,57 @@ Options need a scriptblock rather than a pipe:
 | `-Force` | Reinstalls even when the same version is present, and ignores the MSVC check |
 | `-Ref <branch>` | Installs from a branch other than `main` |
 
+**macOS**, one line, in Terminal:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.sh | bash
+```
+
+That checks for Xcode Command Line Tools and a Rust toolchain, builds the binary
+with `cargo install`, drops the skill in `~/.claude/skills/ost-mcp`, then mounts
+your Outlook profile and runs a query to show it works.
+
+Read it first the same way — `curl -fsSL <url> | less`. Options go after `-s --`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.sh | bash -s -- --install-prereqs
+```
+
+| Option | What it does |
+|---|---|
+| `--install-prereqs` | Installs a missing Rust toolchain with rustup, and prompts for Xcode Command Line Tools |
+| `--skill-scope project` | Puts the skill in `.claude/skills` of `--project-path` instead of your home directory |
+| `--skip-skill` | Binary only |
+| `--force` | Reinstalls even when the same version is present, and continues past the Command Line Tools check |
+| `--ref <branch>` | Installs from a branch other than `main` |
+
+There is no Linux build. Outlook does not run on Linux, so there is no store to read.
+
 ### Let an agent install it
 
-Copy this to Claude Code, or any agent that can run PowerShell. It runs the
-installer, fixes what fails, and checks the result.
+Copy this to Claude Code, or any agent that can run a shell. It runs the installer,
+fixes what fails, and checks the result.
 
 ```text
-Install ost-mcp on this Windows machine and confirm it works.
+Install ost-mcp on this machine and confirm it works.
 
-1. Run this in PowerShell:
-   irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1 | iex
+1. Run the line for this platform.
+   Windows, in PowerShell:
+     irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1 | iex
+   macOS, in a shell:
+     curl -fsSL https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.sh | bash
 
 2. If it stops on a missing prerequisite, install what it names and run it again.
-   To let it install the Rust toolchain and the MSVC build tools itself, run:
-   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1))) -InstallPrereqs
+   To let it install the toolchain itself, add the flag for this platform:
+     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1))) -InstallPrereqs
+     curl -fsSL https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.sh | bash -s -- --install-prereqs
 
-3. If the build fails with LNK1104 on a library such as msvcrt.lib, cargo picked
-   the wrong linker. Re-run from a Developer PowerShell for VS 2022, or run
-   vcvars64.bat first, so link.exe and the CRT come from one toolchain.
+3. On Windows, if the build fails with LNK1104 on a library such as msvcrt.lib,
+   cargo picked the wrong linker. Re-run from a Developer PowerShell for VS 2022,
+   so link.exe and the CRT come from one toolchain.
 
 4. Check all three, and report the actual output of each:
-   - `ost-mcp --list` names at least one .ost or .pst
+   - `ost-mcp --list` names at least one store
    - `ost-mcp --info` prints a backend kind and a folder count
    - the file ~/.claude/skills/ost-mcp/SKILL.md exists
 
@@ -89,10 +119,9 @@ print, quote or save a subject line, a sender address or any message body. Count
 the backend kind and the folder count are the only evidence you need.
 ```
 
-### From source (macOS, Linux, or Windows without the installer)
+### From source
 
-**macOS is source-only for now** — there is no installer script yet, only
-`cargo`. Needs a Rust toolchain and, on Windows, the MSVC build tools.
+Needs a Rust toolchain and, on Windows, the MSVC build tools.
 
 ```sh
 cargo build --release
