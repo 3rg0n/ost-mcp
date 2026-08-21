@@ -1,38 +1,57 @@
 //! Read-only reader for Mac Outlook's local store: `Outlook.sqlite` plus
-//! `.olk15*` companion files.
+//! `.olk15*` companion files, and `HxStore.hxd`.
 //!
 //! ```text
-//! model  <-->  ost-mcp (MCP stdio + DuckDB)  <-->  Outlook.sqlite + .olk15*
+//! model  <-->  ost-mcp (MCP stdio + DuckDB)  <-->  Outlook.sqlite + .olk15* + HxStore.hxd
 //! ```
 //!
 //! Every claim about the on-disk format is measurement-backed in
-//! `docs/mac-outlook-format.md`; read that first. The short version: this
-//! reads real data when an account's classic engine is populated (confirmed
-//! by independent third-party tools against other profiles — see the
-//! `olk15` module docs for credit), and returns empty results rather than a
-//! guess when it is not, which is the normal state for an Exchange/M365
-//! account under "New Outlook" (§2/§3.1 of that doc).
+//! `docs/mac-outlook-format.md`; read that first. The short version: an
+//! account's classic engine (`Outlook.sqlite` + `.olk15*`) holds real
+//! structural data (folders, categories, signatures) but, for New
+//! Outlook/Exchange, no message content — and `HxStore.hxd` (see the
+//! `hxstore`/`hxrecord` module docs for credit) holds that content instead,
+//! for whatever window the account's own sync setting keeps locally. Both
+//! degrade to empty/`NULL` rather than a guess where they have nothing.
 //!
-//! **Known limitation:** `message()` only resolves a body from
-//! `.olk15Message` (the 100%-of-viewed-messages cache). `.olk15MsgSource`
-//! files (full RFC822 MIME, higher fidelity but present for a minority of
-//! messages) are located but not parsed here — that needs a real MIME
-//! parser and a populated profile to validate against, neither of which
-//! this change has. See `CHANGELOG.md`.
+//! **Known limitations**, both from what is not yet resolved in
+//! `docs/mac-outlook-format.md`, not from something guessed around:
+//! - `message()`'s classic-engine path only resolves a body from
+//!   `.olk15Message` (the 100%-of-viewed-messages cache); `.olk15MsgSource`
+//!   (full RFC822 MIME, higher fidelity, present for a minority of messages)
+//!   is located but not parsed.
+//! - Messages recovered from `HxStore.hxd` carry no folder identity and no
+//!   attachment linkage (§2.8) — they are exposed as one synthetic
+//!   [`Folder`](mailbox::Folder), not sorted into Inbox/Sent/etc., and
+//!   `attachments()`/`attachment_bytes()` return nothing for them.
 
 pub mod discover;
+mod hxlz4;
+pub mod hxrecord;
+pub mod hxstore;
 pub mod olk15;
 mod schema;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
-use mailbox::{Error, Mailbox, Result};
+use mailbox::{Error, Folder, Mailbox, Message, MessageRow, Result};
 use rusqlite::Connection;
+
+/// Synthetic folder id for messages recovered from `HxStore.hxd`, which
+/// carries no folder identity of its own (`docs/mac-outlook-format.md`
+/// §2.8). Negative, so it can never collide with a real
+/// `Folders.Record_RecordID`, always a positive SQLite rowid.
+const HX_FOLDER_ID: i64 = -1;
+/// Base for synthetic message ids drawn from the Hx cache — same reasoning,
+/// a different negative range so the two synthetic id spaces stay visually
+/// distinguishable in logs and error messages.
+const HX_ID_BASE: i64 = -1_000_000;
 
 pub struct Profile {
     data_dir: PathBuf,
     conn: Mutex<Connection>,
+    hx_cache: OnceLock<Vec<(i64, hxrecord::HxMessage)>>,
 }
 
 impl Profile {
@@ -41,11 +60,76 @@ impl Profile {
         Ok(Profile {
             data_dir,
             conn: Mutex::new(conn),
+            hx_cache: OnceLock::new(),
         })
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `HxStore.hxd` sits as a sibling of `Data/`, at the identity root.
+    fn hx_store_path(&self) -> Option<PathBuf> {
+        self.data_dir.parent().map(|p| p.join("HxStore.hxd"))
+    }
+
+    /// Parsed once per `Profile`, on first use: decoding a real store is
+    /// tens of megabytes of LZ4 (`docs/mac-outlook-format.md` §2.6), not
+    /// something to redo on every tool call, and mail arriving mid-session
+    /// is not this project's concern for a store meant to be read as a
+    /// snapshot.
+    ///
+    /// A plain read-only `fs::read` of the live file is safe even while
+    /// Outlook is actively rewriting it: every block is independently
+    /// checksummed (§2.3), so a torn read just fails validation and is
+    /// skipped rather than returning wrong data. This never writes to the
+    /// file either way. Absent, unreadable or unparseable is not an error —
+    /// it is the normal state for a classic-engine-backed account with no
+    /// Hx cache at all, and the empty result is what makes that honest.
+    fn hx_cache(&self) -> &[(i64, hxrecord::HxMessage)] {
+        self.hx_cache.get_or_init(|| {
+            let Some(path) = self.hx_store_path() else {
+                return Vec::new();
+            };
+            let Ok(data) = std::fs::read(&path) else {
+                return Vec::new();
+            };
+            if hxstore::check_header(&data).is_err() {
+                return Vec::new();
+            }
+            let records: Vec<_> = hxstore::scan_blocks(&data)
+                .iter()
+                .flat_map(|b| hxrecord::extract(&b.data))
+                .collect();
+            let mut messages = hxrecord::deduplicate(records);
+            // Newest first, so a caller reading the folder without its own
+            // ordering still sees recent mail before old.
+            messages.sort_by_key(|m| std::cmp::Reverse(m.sent_unix.unwrap_or(i64::MIN)));
+            messages
+                .into_iter()
+                .enumerate()
+                .map(|(i, m)| (HX_ID_BASE - i as i64, m))
+                .collect()
+        })
+    }
+
+    fn hx_message_row(id: i64, m: &hxrecord::HxMessage) -> MessageRow {
+        MessageRow {
+            id,
+            folder_id: HX_FOLDER_ID,
+            subject: m.subject.clone(),
+            sender_name: m.sender_name.clone(),
+            sender_email: m.sender_address.clone(),
+            delivered_us: m.sent_unix.map(|s| s * 1_000_000),
+            submitted_us: m.sent_unix.map(|s| s * 1_000_000),
+            modified_us: None,
+            size: None,
+            unread: None,
+            has_attachments: None,
+            // Not a guess: every record recovered here is anchored by this
+            // literal string (`docs/mac-outlook-format.md` §2.4).
+            message_class: Some("IPM.Note".to_string()),
+        }
     }
 
     /// Read one `.olk15*` file relative to `Data/`, decoding the
@@ -106,14 +190,73 @@ impl Mailbox for Profile {
     }
 
     fn folders(&self) -> Result<Vec<mailbox::Folder>> {
-        schema::folders(&self.lock())
+        let mut folders = schema::folders(&self.lock())?;
+        let hx = self.hx_cache();
+        // Only appear when there is something to show: an account with no
+        // Hx cache at all should not gain an empty folder that implies one
+        // exists.
+        if !hx.is_empty() {
+            folders.push(Folder {
+                id: HX_FOLDER_ID,
+                parent_id: None,
+                name: Some("Recovered Mail (Hx cache)".to_string()),
+                path: "/Recovered Mail (Hx cache)".to_string(),
+                item_count: Some(hx.len() as i64),
+                // Read state is not recovered from this source (§2.8).
+                unread_count: None,
+                has_subfolders: false,
+                is_search_folder: false,
+            });
+        }
+        Ok(folders)
     }
 
     fn messages(&self, folder_id: i64) -> Result<Vec<mailbox::MessageRow>> {
+        if folder_id == HX_FOLDER_ID {
+            return Ok(self.hx_cache().iter().map(|(id, m)| Self::hx_message_row(*id, m)).collect());
+        }
         schema::messages(&self.lock(), folder_id)
     }
 
     fn message(&self, id: i64) -> Result<mailbox::Message> {
+        if id <= HX_ID_BASE {
+            let (_, m) = self
+                .hx_cache()
+                .iter()
+                .find(|(i, _)| *i == id)
+                .ok_or_else(|| Error::NotFound(format!("no Hx-cached message with id {id}")))?;
+            return Ok(Message {
+                id,
+                subject: m.subject.clone(),
+                sender_name: m.sender_name.clone(),
+                sender_email: m.sender_address.clone(),
+                // Not recovered from this source (§2.8): no structured
+                // recipient table has been located in HxStore.hxd.
+                display_to: None,
+                display_cc: None,
+                display_bcc: None,
+                delivered_us: m.sent_unix.map(|s| s * 1_000_000),
+                submitted_us: m.sent_unix.map(|s| s * 1_000_000),
+                modified_us: None,
+                size: None,
+                unread: None,
+                message_class: Some("IPM.Note".to_string()),
+                internet_message_id: m.internet_message_id.clone(),
+                conversation_topic: None,
+                // A message's `body_plain` gets Outlook's cached preview
+                // only when there is no full HTML copy — the preview is a
+                // truncated summary of the same content, not a second,
+                // distinct body worth surfacing alongside it.
+                body_plain: if m.html.is_none() { m.preview.clone() } else { None },
+                body_html: m.html.clone(),
+                body_rtf: None,
+                recipients: Vec::new(),
+                // Not recovered from this source (§2.8): no linkage from a
+                // record to the plain-file attachment cache has been found.
+                attachments: Vec::new(),
+            });
+        }
+
         let (row, path_to_data_file, conversation_topic) = schema::mail_row(&self.lock(), id)?;
 
         let mut body_plain = None;
@@ -167,6 +310,12 @@ impl Mailbox for Profile {
     }
 
     fn attachments(&self, message_id: i64) -> Result<Vec<mailbox::Attachment>> {
+        if message_id <= HX_ID_BASE {
+            // Not recovered from this source (§2.8): honestly empty, not a
+            // lookup error — an Hx-cached message may well have attachments,
+            // this reader simply has no way to find them yet.
+            return Ok(Vec::new());
+        }
         let blocks = schema::linked_blocks(&self.lock(), message_id, "Message Attachments")?;
         Ok(blocks
             .into_iter()
@@ -189,6 +338,11 @@ impl Mailbox for Profile {
     }
 
     fn attachment_bytes(&self, message_id: i64, attachment_id: i64) -> Result<Vec<u8>> {
+        if message_id <= HX_ID_BASE {
+            return Err(Error::NotFound(format!(
+                "message {message_id} was recovered from HxStore.hxd, which carries no attachment linkage (docs/mac-outlook-format.md §2.8)"
+            )));
+        }
         let blocks = schema::linked_blocks(&self.lock(), message_id, "Message Attachments")?;
         let block = blocks
             .into_iter()

@@ -126,24 +126,34 @@ Known limits:
 - **Torn pages are not retried.** Outlook writes while you read and every page
   carries a CRC, so this is detectable, but validation is not wired up.
 
-**Mac Outlook** (`Outlook.sqlite` + `.olk15*`, `docs/mac-outlook-format.md`):
+**Mac Outlook** (`Outlook.sqlite` + `.olk15*` + `HxStore.hxd`,
+`docs/mac-outlook-format.md`):
 
-- **Only reads what the classic engine actually cached locally.** "New
-  Outlook" routes mail content for at least Exchange/M365 accounts through an
-  undocumented proprietary store (`HxStore.hxd`) this reader does not — and,
-  per available evidence, cannot reasonably — read. On such an account
-  `folders` and `messages` come back empty rather than guessed.
-- **Message bodies come from `.olk15Message` only.** `.olk15MsgSource` (the
-  higher-fidelity, full-RFC822 file some messages get) is located but not
-  parsed yet — that needs a real MIME parser validated against a populated
-  profile, which this project does not have.
-- **Recipients are not populated.** `Mail` carries flat recipient-address-list
-  columns, not a structured table, and the delimiter/encoding has not been
-  measured against a real row.
-- **Folder names for the standard special folders (Inbox, Sent Items, …) are
-  inferred from a measured type code, not read verbatim** — Outlook itself
-  writes a literal placeholder string into `Folder_Name` on an account whose
-  classic engine holds no real folder data, and that string is never surfaced.
+- **Two local stores, read together.** `Outlook.sqlite` + `.olk15*` (the
+  classic engine) supplies folder, category and signature structure.
+  `HxStore.hxd` — New Outlook's undocumented local cache, independently
+  parsed here — supplies message content for whatever window the account's
+  own sync setting keeps locally (e.g. the last 60 days), for at least
+  Exchange/M365 accounts. Either can be empty on a given account without
+  the other being; both return nothing rather than a guess when they are.
+- **Recovered mail has no folder identity.** `HxStore.hxd` does not tie a
+  message to a specific folder, so every message it supplies is exposed
+  under one synthetic "Recovered Mail (Hx cache)" folder, not sorted into
+  Inbox/Sent/etc.
+- **Recovered mail has no attachment linkage.** A separate plain-file
+  attachment cache exists (`Files/S0/<n>/Attachments/0/*`), but nothing
+  found so far ties one of its files to a specific message.
+- **Classic-engine message bodies come from `.olk15Message` only.**
+  `.olk15MsgSource` (the higher-fidelity, full-RFC822 file some messages
+  get) is located but not parsed yet — that needs a real MIME parser.
+- **Classic-engine recipients are not populated.** `Mail` carries flat
+  recipient-address-list columns, not a structured table, and the
+  delimiter/encoding has not been measured against a real row.
+- **Classic-engine folder names for the standard special folders (Inbox,
+  Sent Items, …) are inferred from a measured type code, not read
+  verbatim** — Outlook itself writes a literal placeholder string into
+  `Folder_Name` on an account whose classic engine holds no real folder
+  data, and that string is never surfaced.
 
 ## Safety
 

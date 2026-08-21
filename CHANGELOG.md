@@ -17,10 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support for the undocumented OST format version 36 written by Outlook 2013 and
   later: 4 KB pages, widened BTree page counts, and zlib-compressed block payloads
   (`docs/ost-v36-format.md`).
-- `ost-mcp` can now mount a Mac Outlook profile (`Outlook.sqlite` + `.olk15*`),
-  read-only, for accounts whose local cache actually holds content; it returns
-  empty folders and no messages rather than a guess when it does not — which is
-  the normal state for a New Outlook / Exchange account (`docs/mac-outlook-format.md`).
+- `ost-mcp` can now mount a Mac Outlook profile, read-only, reading real folder,
+  category and signature structure from `Outlook.sqlite` + `.olk15*` and real
+  message content from `HxStore.hxd` — New Outlook's undocumented local cache,
+  independently parsed (block container, LZ4 payloads, record layout credited to
+  `securized/hxstore-reverse-engineering`, MIT) and exposed as one recovered-mail
+  folder alongside the classic ones, since it carries no folder identity of its
+  own (`docs/mac-outlook-format.md`).
 
 ### Changed
 - Every backend now implements a shared `Mailbox` trait instead of `ost-mcp` calling

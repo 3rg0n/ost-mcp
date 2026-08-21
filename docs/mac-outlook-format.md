@@ -1,45 +1,46 @@
 # Mac Outlook local storage — Phase 0 findings
 
-Measured 2026-08-14 against a live Outlook for Mac identity (Microsoft Outlook
-16.112.26081010, macOS, current build — commonly called "New Outlook"), account
-type Exchange/Microsoft 365, on a Cisco-managed Mac. Every claim below states
-what was counted and on what, per `CONTRIBUTING.md`. All examples use
-`example.com` addresses and invented names; no real subject line, address,
-display name or attachment payload appears here.
+Measured 2026-08-14 through 2026-08-20 against a live Outlook for Mac identity
+(Microsoft Outlook 16.112.26081010, macOS, current build — commonly called
+"New Outlook"), account type Exchange/Microsoft 365, on a Cisco-managed Mac.
+Every claim below states what was counted and on what, per `CONTRIBUTING.md`.
+All examples use `example.com` addresses and invented names; no real subject
+line, address, display name or attachment payload appears here — including in
+§2, added after this document's first version, which required parsing a store
+that turned out to hold real content and was verified by counting and
+aggregate coverage percentages only, never by reading it.
 
 ## Summary
 
 There is no single "the" Mac Outlook store. There are **two independent
-storage engines** sharing one identity directory, and which one holds an
-account's actual mail depends on the account type and possibly on
-organization policy:
+storage engines** sharing one identity directory:
 
 1. **The classic engine** — `Outlook.sqlite` (SQLite, WAL mode) plus
    `.olk15*` companion files. This is the engine the issue's forum sources
    describe, and it is real: it is what several independent open-source
    tools (credited below) successfully read on other Outlook 15 profiles,
-   extracting complete mailboxes.
+   extracting complete mailboxes. On the measured account it holds real
+   structural data (folders, categories, signatures) but no message content
+   at all (§3).
 2. **The Hx engine** — `HxStore.hxd`, an undocumented proprietary binary
-   store (magic string `Nostromoi`), used by "New Outlook" for at least
-   Exchange/M365-backed content sync. No public format documentation or
-   parser is known to exist for it.
+   store (magic `Nostromo` + version byte), used by "New Outlook" for
+   Exchange/M365-backed content sync. **This document's first version said no
+   parser existed for it and recommended against reverse-engineering it. That
+   was wrong** — see §2, added after the account's mail-sync window (60 days,
+   an account-level setting, not something this reader controls) turned out to
+   explain the gap: `Outlook.sqlite` has no message rows because New Outlook
+   never puts them there for this account type, not because nothing is
+   cached. The real 60-day cache is in `HxStore.hxd`, and it is now readable.
 
-On the measured account, **the classic engine's content tables are empty**
-(`Mail`, `Notes`, `Tasks`, `CalendarEvents` all 0 rows) while its structural
-tables are partly real and partly inert placeholders (see below). The Hx
-engine holds the actual mail content but its format is opaque. This is not a
-timing artifact: it was re-checked after a full app quit + WAL checkpoint, and
-again after manually opening several messages, with no change.
-
-**Recommendation:** implement the Mac backend against the classic engine's
-on-disk format (§3), since it is the one with a real, working, independently
-verified format and it is what the issue's original hypothesis describes.
-Have it degrade to empty/`NULL` — never a fabricated value — on an account
-like the one measured here, where the classic engine's content tables are
-unpopulated. Do not attempt to reverse-engineer `HxStore.hxd` (§2): no prior
-art exists, the companion `.hfl` files show no exploitable structure, and per
-§4, the accounts that would need it may have organization policies that
-block local caching and export alike, independent of any parser quality.
+**Recommendation, revised:** implement the Mac backend against **both**
+engines. The classic engine (§3) still supplies real folder/category/
+signature structure and is the only source for any account whose classic
+engine *is* populated (a different account type, or a different
+organization's policy, per §4). `HxStore.hxd` (§2) supplies real message
+content — subject, sender, body/preview, timestamp — for the last ~60 days
+on an Exchange/M365 account like the one measured here, with no folder
+identity and no attachment linkage (open questions, see §2.6). Both degrade to
+empty/`NULL` rather than a fabricated value where they have nothing.
 
 ## 1. Profile discovery (U8)
 
@@ -69,41 +70,223 @@ Files, sizes, at the identity root (sibling of `Data/`):
 
 | File | Size |
 |---|---|
-| `HxStore.hxd` | 76 MB |
+| `HxStore.hxd` | 76–84 MB across the measurement period |
 | `hxcore.hfl` | 50 MB |
 | `hxcore_previous_session.hfl` | 50 MB |
 
 `file(1)` reports all three as `data` — no recognized container format.
-`sqlite3` rejects `HxStore.hxd` outright ("file is not a database"). First 16
-bytes are the ASCII string `Nostromoi` followed by zero padding — a custom
-magic header, not any documented format. Checked against ESE/JET (used by
-Windows' equivalent Mail/Calendar/Outlook sync engine): the ESE signature
-(`efcdab89` at offset 4) is absent; this is not an ESE store despite sharing
-an engine lineage with the Windows side.
-
-The file is page-sparse: bytes at offset 4096 are non-zero and structured;
-offsets 8192, 16384 and 65536 are all-zero. This is consistent with a paged
-allocator, not with a flat blob.
-
-Extracting strings under a naive ASCII scan produces garbled fragments
-(`Dpadd`, `Qdecor`, `PHyper`) that are explained by UTF-16LE-encoded text
-being misaligned by single-byte scanning — i.e., HTML/CSS body content is
-present in the file, consistent with real cached message bodies, but no
-record boundary, length field or index structure was found bounding it.
+`sqlite3` rejects `HxStore.hxd` outright ("file is not a database"). Checked
+against ESE/JET (used by Windows' equivalent Mail/Calendar/Outlook sync
+engine): the ESE signature (`efcdab89` at offset 4) is absent; this is not an
+ESE store despite sharing an engine lineage with the Windows side.
 `hxcore.hfl`'s first 64 bytes show no repeating structure and look
-high-entropy, consistent with an encrypted or hashed companion file.
+high-entropy — unexplored further; nothing below depends on it.
 
-A `Files/` directory alongside `HxStore.hxd` (not the `Data/` tree) holds a
-real, ordinary filesystem cache of attachments and inline images —
-`Files/S0/<n>/Attachments/0/*`, 1,189 plain files with real extensions in the
-measured sample (`.png`, `.jpg`, `.gif`, undecorated MIME-derived names).
-These are directly readable with no format work; the missing piece is the
-mapping from a message to its subdirectory, which was not resolved on this
-account because no message row exists to map from (§1 of the Summary).
+### 2.1 It caches on a real, per-account window — not "nothing," as this document first said
 
-No further work is recommended here: the format is proprietary, undocumented,
-has no known prior art, and the one exploitable lead (UTF-16 body fragments)
-gives no way to delimit one message from the next.
+This document's first version measured `Outlook.sqlite`'s empty `Mail` table,
+found real UTF-16 body fragments in `HxStore.hxd` with no visible record
+boundary, and concluded there was no exploitable local cache. Both
+measurements were correct; the conclusion was not. The account's own mail
+sync setting — visible in Outlook's Accounts preferences, not something this
+reader controls or can discover from either file — is **on, limited to the
+last 60 days**. That is the missing fact: `Outlook.sqlite` has no message
+rows because New Outlook never routes them there for this account type
+(§3.1), not because the account caches nothing. `HxStore.hxd` is where that
+60-day window actually lives, and Outlook's own "Manage Storage" UI
+independently confirms real content exists — 69,903 real inbox items,
+22.4 GB, figures that are themselves a live query against the Exchange Online
+server, since the *entire* on-disk footprint of every Outlook-related file on
+this machine, everywhere, measured with `du -sh`, is under 300 MB. Neither
+number, on its own, told us where the 60-day cache actually was; the account
+setting is what closed the gap.
+
+### 2.2 Format credit
+
+Every structural claim in §2.3–§2.6 — the `Nostromo` magic, the 40-byte block
+header with its two CRC-32s, the LZ4 payload framing, the record layout, the
+.NET tick timestamp encoding — is from
+[`securized/hxstore-reverse-engineering`](https://github.com/securized/hxstore-reverse-engineering)
+(MIT), whose `SPEC.md` describes reading it out of `HxCore.framework`
+disassembly plus Outlook's own Osa protocol logs (§2.7). This project's
+`crates/mac-outlook/src/{hxstore,hxrecord,hxlz4}.rs` is an **independent
+implementation** informed by that research, re-derived in this project's own
+code rather than ported, and — this is the part that matters — **independently
+re-verified against this project's own real file**, not taken on trust: the
+credited project's own tool (`hxprobe`) was built from source and run against
+a snapshot of this account's `HxStore.hxd` first, and its results (17,697 of
+17,781 candidate blocks verified, 20,561 raw `IPM.Note` records, coverage
+percentages) were reproduced independently before any of this project's own
+code was written. This project's own reader was then built, and re-verified
+again against the same file: an exact match on record count (20,561), and
+close but not identical coverage numbers, recorded in §2.6.
+
+### 2.3 File and block container
+
+**Verified** against this project's own file.
+
+```text
++0x00  char[8]  "Nostromo"           file magic
++0x08  u64      version byte         0x69 ('i') on this build
++0x38  u64      page size            4096
+```
+
+An unrecognised version byte does not fail the read — the per-block
+checksums, not the version byte, are what actually guards correctness. The
+credited project reports Windows Mail literature describing `'h'` for the
+same container; this project has not tested a Windows store.
+
+Blocks are found by scanning for an 8-byte magic and validating three things,
+not by walking a directory — no valid block-directory chain was found in
+`.hxd` by either project; the mechanism exists in `HxCore` but opens the
+smaller `.ctr` sidecar stores instead:
+
+```text
++0x00  u32  crc32(block[0x04..0x20])              header checksum
++0x04  u32  crc32(block[0x08..0x28+payload_len])  payload checksum
++0x08  u64  magic 0x5d0245643b706a05
++0x10  u32  kind          (observed 8; the credited project also observed 16)
++0x14  u32  payload_len   LZ4-compressed bytes, starting at +0x28
++0x18  u32  inflated_len  exact decompressed size
++0x1c  u32  4             constant in every block observed by either project
++0x28  ...  LZ4-compressed payload
+```
+
+CRC-32 is the standard IEEE/zlib polynomial (`0xEDB88320`). The LZ4 payload is
+plain block format — no frame header, no trailing checksum — decoded requiring
+an exact match to `inflated_len`; anything else (short output, a
+back-reference outside the window) means the scan found a false-positive
+magic hit, not a format variant, and the block is skipped rather than
+returning partial or wrong data.
+
+**Measured, this project's snapshot:** 17,751 blocks passed all three checks
+(header CRC, payload CRC, exact inflated length), decompressing to
+299,243,728 bytes. The credited project's own tool, run against the same
+snapshot, found 17,781 magic-byte candidates and verified 17,697 of them
+(99.53%) — a close but not identical count to this project's 17,751, which is
+expected of two independently written scanners and not investigated further,
+since both numbers agree to within 0.3% and the downstream record count
+matches exactly (§2.6).
+
+### 2.4 Records: a sequence of UTF-16LE strings around an anchor
+
+Message metadata is not a struct at a fixed offset. Each record is anchored
+by the literal string `"IPM.Note"` (UTF-16LE), and the fields around it — the
+sender's address and display name before it, the Message-ID/preview/subject
+after it — are NUL-terminated UTF-16LE runs whose *byte offset drifts with
+every preceding field's length*. A parser has to walk the sequence in order
+and classify each run by shape (does it parse as an email address? a GUID? a
+subject-shaped phrase?), never index a fixed displacement. Two layouts occur:
+the common one puts the sender pair just before the anchor; a second puts the
+whole header after it, which is why this project's sender search (§2.6, the
+bug found and fixed) must not apply the same distance bound on both sides.
+
+The most useful single rule, credited directly: `NormalizedSubject` and
+`Topic` are written back to back and are near-identical (one keeps
+reply/forward prefixes, one strips them) — a value that appears **twice** in
+a record's field sequence is the subject; a value that appears **once** is
+the cached body preview. There is no other reliable way to tell the two
+apart, since both are plausible-length phrases sitting in the same region of
+the record.
+
+### 2.5 Timestamps: .NET ticks, not FILETIME
+
+Verified with a known-plaintext pair from Outlook's own Osa protocol logs
+(§2.7), which log one timestamp field in both raw and human-readable form in
+the same response: the raw value `639201014590000000`, divided by `10^7`
+seconds after `0001-01-01T00:00:00Z`, is exactly the timestamp the same log
+line renders as `2026-07-19T23:44:19Z`. This rules out Windows `FILETIME`
+(epoch 1601, which decoding the same bytes as ticks would place in the 3600s)
+and confirms 100-nanosecond .NET ticks:
+
+```text
+unix_seconds = (ticks - 621_355_968_000_000_000) / 10_000_000
+```
+
+A record holds several ticks (send, delivery, last-modified, sync), not one,
+and fixed byte offsets do not reliably find any specific one — this project's
+first attempt bounded the scan window too narrowly around the anchor and
+under-merged message revisions as a result (§2.6). Scanning the *whole*
+record span (from the previous anchor to the next) and taking the **earliest**
+tick found reliably recovers the send time: a message is sent before it is
+delivered, modified or synced, so the minimum tick in its span is send time
+far more often than any other ordinal position is.
+
+### 2.6 What this project measured on its own reader, and one bug found and fixed
+
+All numbers below are from this project's own implementation
+(`crates/mac-outlook/src/{hxstore,hxrecord,hxlz4}.rs`), run via
+`cargo run -p mac-outlook --example hx_probe <snapshot>` against the same
+snapshot the credited project's tool was run against — aggregate counts only,
+never real message content, per the redaction rule at the top of this
+document.
+
+| | This project | Credited project's tool, same file |
+|---|---|---|
+| Blocks verified | 17,751 | 17,697 / 17,781 (99.53%) |
+| Decompressed | 299,243,728 bytes | ~298 MB (implied) |
+| `IPM.Note` records | **20,561** | **20,561** — exact match |
+| Distinct messages (deduplicated) | 10,476 | 10,258 |
+| Sender coverage | 97.7% | 99.9% |
+| Sender-name coverage | 67.4% | 82.4% |
+| Subject coverage | 77.2% | 90.8% |
+| Preview/body coverage | 97.9% | 98.6% |
+| Full HTML coverage | 30.1% | 30.7% |
+| Timestamp coverage | 100.0% | 100.0% |
+
+The exact match on raw record count, before any field extraction happens,
+confirms the block/decompression/anchor-finding layers are correct
+independent of anything downstream. The gaps in subject and sender-name
+coverage are an honest simplification, not a bug: this project's field
+classifier does not implement the credited project's conversation-level
+subject back-fill (writing the subject once per thread rather than once per
+message, and propagating it to sibling records that share a thread
+identifier) or its "unpaired subject" fallback for a lone subject-shaped run
+with no duplicate — both are described in the credited write-up as raising
+its own subject coverage from roughly 85% to 88.7%, and neither is
+implemented here.
+
+**One real bug was found and fixed during this verification, not left as a
+known gap.** The first version of this project's sender search applied the
+before-anchor distance bound (320 bytes) to *both* sides of the anchor;
+because a real record's header sometimes sits entirely after the anchor with
+no equivalent distance limit in that direction (§2.4's second layout), this
+silently rejected a valid sender on every record using that layout and
+measured at 50.0% sender coverage. Widening the after-anchor side to be
+unbounded — matching the credited project's own approach, re-read after the
+gap was found rather than guessed at — raised it to the 97.7% in the table
+above. Relatedly, the first version's timestamp scan used a fixed 64-byte
+lookback rather than the true previous-anchor-to-next span; this caused
+different revisions of the same message to sometimes compute different send
+times and fail to merge, inflating the deduplicated message count from a
+plausible ~10,500 to 13,251 before the fix.
+
+### 2.7 The Osa protocol logs: a schema oracle, not a content source
+
+`Outlook 15 Profiles/<identity>/Osa/OutlookServiceApiLogs_*/` holds gzipped
+XML request/response logs of the live sync protocol — the same directory
+whose existence answered U9 in this document's first version (§5). Message
+*content* in these logs is redacted (`<Subject>pii:...</Subject>`), but field
+*names*, their order and their enum values are in the clear, which is what
+resolved the timestamp encoding in §2.5 and is the best available target list
+for whatever in §2.4/§2.6 is not yet mapped (folder identity, read state,
+recipient To/Cc/Bcc distinction). Retention is roughly 10 days on this
+account, unconfirmed whether that is a fixed or configurable window.
+
+### 2.8 Open questions
+
+- **No folder identity.** Nothing observed in a record ties it to a specific
+  mail folder (Inbox vs. Sent vs. Deleted). The Osa logs (§2.7) sync a
+  folder-identifying field for other purposes, which is the lead for future
+  work; until then, a `Mailbox` implementation built on this source can only
+  expose one flat collection of recovered messages, not real folders.
+- **No attachment linkage.** `Files/S0/<n>/Attachments/0/*` (documented in
+  the superseded §2 of this document's first version, and still present and
+  real — 1,189 plain files with real extensions in the measured sample) is
+  not tied to any record here by anything this project has found.
+- **Recipients.** Addresses inside a record's span can be collected, but
+  nothing establishes ordering or a To/Cc/Bcc distinction.
+- **Windows stores.** Untested by either project.
 
 ## 3. The classic engine — `Outlook.sqlite` + `.olk15*`
 
@@ -300,15 +483,15 @@ mail storage. A separate managed-preferences key,
 Hx-backed Exchange account entry — a real, measured Hx-adjacent setting,
 though its exact effect was not tested.
 
-No key was found that explicitly disables local content caching by name; the
-empty `Mail` table cannot be attributed to this policy with certainty rather
-than to New Outlook's Hx architecture running by default. Either way, the
-practical conclusion is the same: **on a managed corporate device of this
-kind, neither the live SQLite store nor `.olm` export may be available**,
-independent of how complete a Mac backend's implementation is. A backend
-should be written and tested against the classic engine (§3), which is real
-and works on the accounts prior art demonstrates it working on, and should
-report — not guess past — an account where it does not apply.
+No key was found that explicitly disables local content caching by name, and
+§2.1 confirms the reason is not policy at all: the empty `Mail` table is
+New Outlook routing content elsewhere by design, not this device's MDM
+profile suppressing it. `DisableExport = 1` remains a real, independent
+finding — the issue's Phase 3 (`.olm` archive) fallback is unavailable on a
+managed device carrying this policy, regardless of what a Mac backend reads
+locally. A backend should be written against **both** local engines (§2, §3)
+and should still report — not guess past — an account where either one has
+nothing.
 
 ## 5. Resolution of the issue's Unknowns
 
@@ -319,7 +502,7 @@ report — not guess past — an account where it does not apply.
 | U3 | Timestamp epoch/unit | Not confirmed against a real message row; `Record_ModDate` on real rows here is Unix seconds. Needs re-verification once a populated account is available. |
 | U4 | Body location: column vs external file | External file, via `PathToDataFile`, confirmed structurally for every populated table. `.olk15MsgSource` is the "cheap path" the issue hoped for, but covers a minority of messages; `.olk15Message` is the 100%-coverage fallback and needs real parsing work, not just a MIME parser. |
 | U5 | `.olk15` wrapper layout | Resolved for `Message` and `MsgAttachment` (§3.2), credited from external measurement, not yet independently re-verified against a real file from this account. |
-| U6 | Attachments: payload location and linkage | `Blocks`/`Mail_OwnedBlocks` join (§3.2). Separately, a plain-file attachment cache exists under the Hx side too (§2), unlinked from any message on this account. |
+| U6 | Attachments: payload location and linkage | `Blocks`/`Mail_OwnedBlocks` join (§3.2), for an account whose classic engine is populated. Separately, a plain-file attachment cache exists under the Hx side too (`Files/S0/<n>/Attachments/0/*`, §2.8), but nothing found so far links one of its files to a specific Hx record. |
 | U7 | Rest of the message row | Present in the `Mail` schema: `Message_ReadFlag`, `Message_Size`, `Message_HasAttachment`, `Message_ThreadTopic`, `Message_type` (message class). See §3.1. |
 | U8 | Discovery without hardcoding | Confirmed necessary twice over (§1). Glob `Outlook 15 Profiles/*/Data`. |
-| U9 | Does New Outlook use this store at all | **No, not for content, on this account.** Structural tables (`Folders`, `Categories`, `Signatures`) are written by the classic engine; content (`Mail`, `Notes`, `Tasks`, `CalendarEvents`) is not, and appears to route through the undocumented Hx engine (§2) instead. This is New Outlook-specific (`IsRunningNewOutlook = 1` in `com.microsoft.Outlook` preferences) and was confirmed by direct evidence of a `sync.GetMessage` network call being logged (`Osa/OutlookServiceApiLogs_*/*.req.xmlgz`), not merely inferred from the empty table. |
+| U9 | Does New Outlook use this store at all | **Partially, and it depends what "this store" means.** The classic `Outlook.sqlite` engine is not used for content on this account (`Mail`, `Notes`, `Tasks`, `CalendarEvents` all empty; confirmed by a `sync.GetMessage` network call logged at `Osa/OutlookServiceApiLogs_*/*.req.xmlgz`, not merely inferred). But New Outlook *does* cache content locally for this account — in `HxStore.hxd` (§2), honoring the account's own 60-day sync window — which this document's first version missed and later corrected. |
