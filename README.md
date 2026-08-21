@@ -173,6 +173,10 @@ Known limits:
 - **Recovered mail has no attachment linkage.** A separate plain-file
   attachment cache exists (`Files/S0/<n>/Attachments/0/*`), but nothing
   found so far ties one of its files to a specific message.
+- **Recovered mail's sender is sometimes NULL rather than a guess.** When a
+  record's sender metadata sits after the anchor and holds more than one
+  address (a participant's and the true sender's), there is no reliable way
+  yet to tell them apart — see `docs/mac-outlook-format.md` §2.6.1.
 - **Classic-engine message bodies come from `.olk15Message` only.**
   `.olk15MsgSource` (the higher-fidelity, full-RFC822 file some messages
   get) is located but not parsed yet — that needs a real MIME parser.

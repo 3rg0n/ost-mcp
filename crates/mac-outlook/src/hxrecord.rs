@@ -258,33 +258,50 @@ fn find_subject(after: &[Field]) -> Option<&Field> {
 
 /// The sender address/name pair: the nearest address to the anchor (within
 /// [`SENDER_MAX_DIST`]), and the display name immediately beside it.
+///
+/// **Measured limitation, not a guess:** a before-anchor match (the common
+/// case, "Layout A") is trusted as soon as it is found — there is exactly one
+/// sender-shaped candidate in that narrow, bounded window in every case this
+/// project has checked. An after-anchor match ("Layout B", §4.2) is
+/// different: real records were found, by diagnosing this exact function
+/// against a live store with `examples/hx_probe.rs --layout-near`, where the
+/// after-anchor region holds *two* address+display-name pairs — a
+/// participant's address, then the true sender's, thousands of bytes further
+/// out — and this function was picking the nearer, wrong one. There is no
+/// signal in what this project has measured so far (§2.8 of
+/// `docs/mac-outlook-format.md`) that reliably says which of several
+/// after-anchor candidates is the sender, so when more than one exists here,
+/// this returns `None` rather than the nearer guess: a wrong sender that
+/// looks plausible is worse than no sender, per `CONTRIBUTING.md`.
 fn find_sender(before: &[Field], after: &[Field]) -> (Option<String>, Option<String>) {
-    let mut candidates: Vec<&Field> = before.iter().rev().collect();
-    candidates.extend(after.iter());
-
-    // The distance bound applies only to fields *before* the anchor: those
-    // belong to whichever record is nearest, so a match hundreds of bytes
-    // back is the previous message's, not this one's. There is no equivalent
-    // risk after the anchor in the common case, and "Layout B" (§4.2 of the
-    // credited write-up) puts the whole header there, sometimes well past
-    // this distance — capping it there would silently reject a real sender
-    // on every record using that layout.
-    let Some(idx) = candidates
+    if let Some((addr, addr_rel)) = before
         .iter()
-        .position(|f| (f.rel > 0 || f.rel.abs() <= SENDER_MAX_DIST) && is_email(f.text.trim()))
-    else {
-        return (None, None);
-    };
-    let addr = undouble(candidates[idx].text.trim());
-    let addr_rel = candidates[idx].rel;
+        .rev()
+        .find(|f| f.rel.abs() <= SENDER_MAX_DIST && is_email(f.text.trim()))
+        .map(|f| (undouble(f.text.trim()), f.rel))
+    {
+        let name = nearby_person_name(before.iter().rev(), addr_rel).or_else(|| nearby_person_name(after.iter(), addr_rel));
+        return (Some(addr.to_lowercase()), name);
+    }
 
-    let name = [candidates.get(idx + 1), idx.checked_sub(1).and_then(|i| candidates.get(i))]
-        .into_iter()
-        .flatten()
-        .find(|f| (f.rel - addr_rel).abs() <= NAME_MAX_DIST && looks_like_person(&undouble(f.text.trim())))
-        .map(|f| undouble(f.text.trim()));
+    let after_emails: Vec<&Field> = after.iter().filter(|f| is_email(f.text.trim())).collect();
+    match after_emails.as_slice() {
+        [] => (None, None),
+        [only] => {
+            let addr = undouble(only.text.trim());
+            let name = nearby_person_name(after.iter(), only.rel);
+            (Some(addr.to_lowercase()), name)
+        }
+        _ => (None, None),
+    }
+}
 
-    (Some(addr.to_lowercase()), name)
+/// A person-name-shaped field within [`NAME_MAX_DIST`] of `addr_rel`.
+fn nearby_person_name<'a>(fields: impl Iterator<Item = &'a Field>, addr_rel: isize) -> Option<String> {
+    fields
+        .filter(|f| f.rel != addr_rel && (f.rel - addr_rel).abs() <= NAME_MAX_DIST)
+        .map(|f| undouble(f.text.trim()))
+        .find(|t| looks_like_person(t))
 }
 
 /// The earliest 100-nanosecond .NET tick value in `span`, as Unix seconds.
@@ -353,8 +370,38 @@ fn text_run_end(b: &[u8]) -> usize {
     b.len()
 }
 
+/// A field's shape, with its text redacted — for diagnosing extraction
+/// behaviour against a real store without exposing real content. Used by
+/// `examples/hx_probe.rs`'s `--layout` mode.
+#[derive(Debug, Clone, Copy)]
+pub struct FieldShape {
+    pub rel: isize,
+    pub is_email: bool,
+    pub is_person_name: bool,
+    pub char_len: usize,
+}
+
+impl From<&Field> for FieldShape {
+    fn from(f: &Field) -> Self {
+        let t = f.text.trim();
+        FieldShape {
+            rel: f.rel,
+            is_email: is_email(t),
+            is_person_name: looks_like_person(t),
+            char_len: t.chars().count(),
+        }
+    }
+}
+
 /// Extract every `IPM.Note` record from one decompressed block.
 pub fn extract(blob: &[u8]) -> Vec<HxMessage> {
+    extract_with_shapes(blob).into_iter().map(|(m, _)| m).collect()
+}
+
+/// [`extract`], alongside the redacted field shapes ([`FieldShape`]) that
+/// produced each message — for diagnosing extraction behaviour against a
+/// real store without exposing real content.
+pub fn extract_with_shapes(blob: &[u8]) -> Vec<(HxMessage, Vec<FieldShape>)> {
     let needle = anchor_needle();
     let mut out = Vec::new();
     let mut search_from = 0usize;
@@ -376,6 +423,8 @@ pub fn extract(blob: &[u8]) -> Vec<HxMessage> {
 
         let before = walk_fields(blob, anchor, sender_search_lo, anchor);
         let after = walk_fields(blob, anchor, anchor + needle.len(), next);
+        let shapes: Vec<FieldShape> =
+            before.iter().chain(after.iter()).map(FieldShape::from).collect();
 
         let (sender_address, sender_name) = find_sender(&before, &after);
         let internet_message_id = after.iter().find(|f| is_message_id(f.text.trim())).map(|f| {
@@ -392,15 +441,18 @@ pub fn extract(blob: &[u8]) -> Vec<HxMessage> {
         let sent_unix = find_send_time(&blob[prev_anchor..next]);
         prev_anchor = anchor;
 
-        out.push(HxMessage {
-            sender_address,
-            sender_name,
-            internet_message_id,
-            subject,
-            preview,
-            html,
-            sent_unix,
-        });
+        out.push((
+            HxMessage {
+                sender_address,
+                sender_name,
+                internet_message_id,
+                subject,
+                preview,
+                html,
+                sent_unix,
+            },
+            shapes,
+        ));
 
         search_from = anchor + needle.len();
     }
@@ -489,6 +541,32 @@ mod tests {
         assert_eq!(r.internet_message_id.as_deref(), Some("abc123@example.com"));
         assert_eq!(r.subject.as_deref(), Some("Quarterly update"));
         assert_eq!(r.sent_unix, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn ambiguous_after_anchor_sender_returns_none_rather_than_a_guess() {
+        // Reproduces the real layout found via `examples/hx_probe.rs
+        // --layout-near` against a live store: no sender-shaped field before
+        // the anchor, and two address+name pairs after it — a participant's,
+        // then the true sender's, with no signal here to tell which is
+        // which. Measured wrong once (a participant's address returned as
+        // the sender); this must now return `None` instead.
+        let mut b = Vec::new();
+        b.extend(utf16le(ANCHOR));
+        b.extend(utf16le("<abc123@example.com>"));
+        const UNIX_EPOCH_TICKS: i64 = 621_355_968_000_000_000;
+        let ticks = (1_700_000_000i64 * 10_000_000) + UNIX_EPOCH_TICKS;
+        b.extend_from_slice(&(ticks as u64).to_le_bytes());
+        b.extend(utf16le("participant@example.com"));
+        b.extend(utf16le("A Participant"));
+        b.extend(utf16le("gap filler text that is not a name or address"));
+        b.extend(utf16le("true.sender@example.com"));
+        b.extend(utf16le("The True Sender"));
+
+        let records = extract(&b);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].sender_address, None);
+        assert_eq!(records[0].sender_name, None);
     }
 
     #[test]

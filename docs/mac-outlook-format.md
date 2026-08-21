@@ -221,18 +221,23 @@ snapshot the credited project's tool was run against — aggregate counts only,
 never real message content, per the redaction rule at the top of this
 document.
 
-| | This project | Credited project's tool, same file |
+| | This project (current) | Credited project's tool, same file |
 |---|---|---|
-| Blocks verified | 17,751 | 17,697 / 17,781 (99.53%) |
-| Decompressed | 299,243,728 bytes | ~298 MB (implied) |
-| `IPM.Note` records | **20,561** | **20,561** — exact match |
-| Distinct messages (deduplicated) | 10,476 | 10,258 |
-| Sender coverage | 97.7% | 99.9% |
-| Sender-name coverage | 67.4% | 82.4% |
-| Subject coverage | 77.2% | 90.8% |
-| Preview/body coverage | 97.9% | 98.6% |
-| Full HTML coverage | 30.1% | 30.7% |
+| Blocks verified | 16,362 (later snapshot; live file, see §2.1) | 17,697 / 17,781 (99.53%), earlier snapshot |
+| Decompressed | 272,580,559 bytes | ~298 MB (implied), earlier snapshot |
+| `IPM.Note` records | 19,114 | 20,561, earlier snapshot |
+| Distinct messages (deduplicated) | 10,340 | 10,258 |
+| Sender coverage | 65.6% (was 97.7% before §2.6.1's fix) | 99.9% |
+| Sender-name coverage | 48.3% (was 67.4%) | 82.4% |
+| Subject coverage | 75.6% | 90.8% |
+| Preview/body coverage | 98.9% | 98.6% |
+| Full HTML coverage | 29.3% | 30.7% |
 | Timestamp coverage | 100.0% | 100.0% |
+
+The block/record counts differ from the first version of this table because
+the live file had synced further between snapshots — this project's own
+counts moved in step with it, not against it, which is itself a consistency
+check.
 
 The exact match on raw record count, before any field extraction happens,
 confirms the block/decompression/anchor-finding layers are correct
@@ -261,6 +266,48 @@ different revisions of the same message to sometimes compute different send
 times and fail to merge, inflating the deduplicated message count from a
 plausible ~10,500 to 13,251 before the fix.
 
+### 2.6.1 A second sender bug, found through real use, not review
+
+The bugs in §2.6 were found by deliberately verifying against a real file.
+This one was found the other way: by using the finished tool to answer a real
+question ("what did this person's last email say") and noticing the answer
+didn't match the message's own quoted text. That is the more important
+signal — a coverage percentage cannot catch a wrong-but-plausible value,
+only a person reading the actual output can.
+
+**What was wrong.** §2.6's fix widened the after-anchor sender search to be
+unbounded, which was the right call for coverage (50.0% → 97.7%) but did not
+account for a real, now-measured case: some records' after-anchor region
+holds **two** address+display-name pairs, not one — a participant's, then the
+true sender's, sometimes thousands of bytes apart. Picking "the first
+email-shaped field found" (nearest to the anchor) picked the participant's
+address on these records, not the sender's. Diagnosed on a real store with
+the redacted structural dump `cargo run -p mac-outlook --example hx_probe
+<snapshot> --layout-near <unix_seconds>`, which prints each field's offset,
+type-shape and length — never its text — for the record nearest a given
+timestamp. Two independently-known-wrong records were traced this way: both
+had exactly two after-anchor address+name pairs, and both had picked the
+nearer, wrong one.
+
+**The fix.** When the after-anchor fallback finds more than one
+address-shaped candidate, this project's reader now returns `None` rather
+than guess — there is no signal in what has been measured so far that
+reliably says which of several candidates is the sender (this remains an
+open question, §2.8). A before-anchor match (the common, simpler case) is
+unaffected and still trusted as soon as found, since no ambiguity has been
+observed there. This is directly the `CONTRIBUTING.md` rule that a
+plausible-looking wrong value is worse than `NULL` — measured here, not
+asserted: sender coverage dropped from 97.7% to 65.6%, and every case checked
+by hand now shows the correct sender or `None`, never a wrong one.
+
+**A secondary, accepted consequence.** Deduplication keys on
+`(sender, sent_unix)` (§4.7's rule). A message whose good revision resolves a
+real sender and whose lesser revision now resolves to `None` no longer merges
+into one entry — the reader shows an extra, mostly-empty duplicate instead.
+This inflates the distinct-message count slightly and is a known, accepted
+cost of the fix, not a new defect: no field is reported wrong, some are
+reported twice.
+
 ### 2.7 The Osa protocol logs: a schema oracle, not a content source
 
 `Outlook 15 Profiles/<identity>/Osa/OutlookServiceApiLogs_*/` holds gzipped
@@ -286,6 +333,13 @@ account, unconfirmed whether that is a fixed or configurable window.
   not tied to any record here by anything this project has found.
 - **Recipients.** Addresses inside a record's span can be collected, but
   nothing establishes ordering or a To/Cc/Bcc distinction.
+- **Which after-anchor candidate is the sender, when there is more than
+  one.** §2.6.1 measured that some records hold two address+display-name
+  pairs after the anchor, one a participant's and one the true sender's, with
+  no signal found so far to tell them apart. This project returns `None`
+  rather than guess (§2.6.1); resolving it for real — rather than declining
+  to answer — most likely needs the `Type`/`IsMe` attributes the Osa schema
+  names on `SenderDisplayNamesCollection` (§2.7), not yet decoded here.
 - **Windows stores.** Untested by either project.
 
 ## 3. The classic engine — `Outlook.sqlite` + `.olk15*`

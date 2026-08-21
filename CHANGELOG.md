@@ -67,3 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value for a row reads as absent rather than as whatever bytes the cell still holds.
 - `messages.has_attachments` falls back to `PidTagMessageFlags`, which is where a
   contents table actually records it.
+- A Mac `HxStore.hxd` record whose sender metadata sits entirely after the anchor
+  and holds more than one address, one a participant's and one the true sender's,
+  no longer reports the nearer (and sometimes wrong) one as the sender; it reports
+  neither rather than guess. Found by using the tool to answer a real question and
+  checking the answer against the message's own quoted text, not by review.

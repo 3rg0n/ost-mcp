@@ -10,9 +10,17 @@
 use mac_outlook::{hxrecord, hxstore};
 
 fn main() {
-    let Some(path) = std::env::args().nth(1) else {
-        eprintln!("usage: cargo run -p mac-outlook --example hx_probe <path-to-HxStore.hxd>");
+    let mut args = std::env::args().skip(1);
+    let Some(path) = args.next() else {
+        eprintln!("usage: cargo run -p mac-outlook --example hx_probe <path-to-HxStore.hxd> [--layout-near <unix_seconds>]");
         std::process::exit(2);
+    };
+    let layout_near: Option<i64> = match args.next().as_deref() {
+        Some("--layout-near") => Some(args.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| {
+            eprintln!("--layout-near needs a unix-seconds value");
+            std::process::exit(2);
+        })),
+        _ => None,
     };
 
     let data = match std::fs::read(&path) {
@@ -46,6 +54,36 @@ fn main() {
         m
     });
     println!("kinds     {kinds:?}");
+
+    if let Some(target) = layout_near {
+        // Redacted structural dump only: byte offset relative to the anchor,
+        // whether a field parses as an email or a person name, and its
+        // length — never the field's actual text.
+        let mut best: Option<(i64, Vec<hxrecord::FieldShape>)> = None;
+        for b in &blocks {
+            for (rec, shapes) in hxrecord::extract_with_shapes(&b.data) {
+                if let Some(t) = rec.sent_unix {
+                    let dist = (t - target).abs();
+                    if best.as_ref().map(|(d, _)| dist < *d).unwrap_or(true) {
+                        best = Some((dist, shapes));
+                    }
+                }
+            }
+        }
+        match best {
+            Some((dist, shapes)) => {
+                println!("layout    nearest record found, {dist}s from target");
+                for s in shapes {
+                    println!(
+                        "  rel={:>6}  email={:<5}  person_name={:<5}  chars={}",
+                        s.rel, s.is_email, s.is_person_name, s.char_len
+                    );
+                }
+            }
+            None => println!("layout    no record with a timestamp found"),
+        }
+        return;
+    }
 
     let raw: Vec<_> = blocks.iter().flat_map(|b| hxrecord::extract(&b.data)).collect();
     println!("records   {} IPM.Note records across all blocks", raw.len());
