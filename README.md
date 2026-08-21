@@ -32,17 +32,29 @@ compiles DuckDB, so expect a few minutes.
 cargo build --release
 ```
 
-The binary lands at `target/release/ost-mcp`.
+The binary lands at `target/release/ost-mcp`. Use `cargo install --path
+crates/ost-mcp` instead to put `ost-mcp` on your `PATH`, which is what the skill
+expects.
 
 ## Use
 
 ```sh
-ost-mcp                          # serve MCP over stdio on the discovered store
-ost-mcp <file.ost>               # serve MCP on a named OST/PST
-ost-mcp <profile Data dir>       # serve MCP on a named Mac Outlook profile
-ost-mcp [store] --sql "..."      # run one query, print JSON, exit
-ost-mcp --list                   # list the stores that were discovered
+ost-mcp                                # serve MCP over stdio on the discovered store
+ost-mcp <file.ost>                     # serve MCP on a named OST/PST
+ost-mcp <profile Data dir>             # serve MCP on a named Mac Outlook profile
+ost-mcp [store] --list                 # list the stores that were discovered
+ost-mcp [store] --info                 # path, backend kind, size, schema
+ost-mcp [store] --sql "..."            # run one query, print JSON, exit
+ost-mcp [store] --message <nid>        # one message: headers, recipients, body
+ost-mcp [store] --attachments <nid>    # attachment metadata for a message
+ost-mcp [store] --attachment <m>:<a>   # one payload, as text or base64
+ost-mcp [store] --attachment <m>:<a> --out f   # write the payload to a file
 ```
+
+Every MCP tool has a flag that prints the same JSON and exits, so the binary is
+usable from a shell or a script without speaking the protocol. `--sql` covers
+folder listing and search on its own, since both are queries over the same two
+tables.
 
 With no argument, the store is resolved from the Outlook profile registry on
 Windows (`DefaultProfile` first) or from the Outlook group container on macOS —
@@ -52,6 +64,21 @@ which profile and account each store belongs to.
 ```sh
 $ ost-mcp --sql "SELECT folder_path, count(*) FROM messages GROUP BY 1 ORDER BY 2 DESC LIMIT 3"
 ```
+
+### As a Claude Code skill
+
+Lower friction than an MCP server: no config file to edit and no restart. Put the
+binary on `PATH` and copy the bundled skill into place.
+
+```sh
+cargo install --path crates/ost-mcp
+cp -r skills/ost-mcp ~/.claude/skills/          # or .claude/skills/ in one project
+```
+
+The skill teaches the schema and the query patterns, then shells out to the flags
+above. It costs nothing until a question actually needs the mailbox, where an MCP
+server's tool definitions sit in the context of every turn. Set `OST_MCP_BIN` if
+the binary is somewhere unusual. See [`skills/ost-mcp/SKILL.md`](skills/ost-mcp/SKILL.md).
 
 ### As an MCP server
 
@@ -70,15 +97,18 @@ Add the store path as an argument if you want a specific one:
 
 ## Tools
 
-| Tool | What it does |
-|---|---|
-| `store_info` | Path, backend kind, folder count, schema |
-| `list_folders` | The folder tree with item and unread counts |
-| `search` | Messages by text, folder, date range, attachment presence |
-| `sql` | One read-only statement, for anything `search` cannot express |
-| `get_message` | One message: headers, recipients, body, attachment list |
-| `list_attachments` | Attachment metadata without reading a payload |
-| `read_attachment` | One attachment's bytes, as text when they are text |
+| Tool | What it does | CLI |
+|---|---|---|
+| `store_info` | Path, backend kind, folder count, schema | `--info` |
+| `list_folders` | The folder tree with item and unread counts | `--sql` |
+| `search` | Messages by text, folder, date range, attachment presence | `--sql` |
+| `sql` | One read-only statement, for anything `search` cannot express | `--sql` |
+| `get_message` | One message: headers, recipients, body, attachment list | `--message` |
+| `list_attachments` | Attachment metadata without reading a payload | `--attachments` |
+| `read_attachment` | One attachment's bytes, as text when they are text | `--attachment` |
+
+Both surfaces build their replies from the same functions, so a tool and its flag
+return identical JSON.
 
 `sql` runs against a DuckDB with external access disabled, so a query can read the
 mailbox but cannot reach the filesystem or the network.
@@ -159,9 +189,11 @@ Known limits:
 
 Read-only by construction: an OST/PST is memory-mapped without write access, a Mac
 profile's `Outlook.sqlite` is opened with SQLite's read-only flag, and neither
-backend has a code path that writes to a store. It is still your mail — a model
-with this server attached can read every message in the mailbox, so attach it
-deliberately.
+backend has a code path that writes to a store. `--attachment --out` is the only
+thing that writes anywhere, and it writes one payload to the path you name.
+
+It is still your mail — a model with this server or skill attached can read every
+message in the mailbox, so attach it deliberately.
 
 ## License
 

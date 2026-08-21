@@ -24,19 +24,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `securized/hxstore-reverse-engineering`, MIT) and exposed as one recovered-mail
   folder alongside the classic ones, since it carries no folder identity of its
   own (`docs/mac-outlook-format.md`).
+- A bundled Claude Code skill (`skills/ost-mcp/SKILL.md`) drives the binary from the
+  shell, so a model can query the mailbox without an MCP server registration.
+- Every MCP tool now has a command-line flag that prints the same JSON and exits:
+  `--info`, `--message`, `--attachments` and `--attachment` join `--sql`, which
+  already covered folder listing and search.
+- `--attachment <msg>:<att> --out <path>` writes an attachment's bytes to a file,
+  which base64 through a terminal cannot usefully do.
 
 ### Changed
 - Every backend now implements a shared `Mailbox` trait instead of `ost-mcp` calling
   the OST reader directly, so the Mac backend and a future `.olm` reader can sit
   behind the same MCP surface (`docs/adr/0001-mailbox-backend-trait.md`).
 - Message, folder and attachment ids widened from `u32` to `i64` at the MCP tool
-  boundary, to accommodate backends whose native ids do not fit a `u32`.
+  boundary and in the CLI flags, to accommodate backends whose native ids do not
+  fit a `u32` — including negative ids for messages recovered from `HxStore.hxd`.
 - `store_info` reports a `kind` string (e.g. `ost-v36`, `mac-olk15`) instead of a
   numeric `version` field, since format version is not a concept every backend has.
 - A scope-less `ost_attachments()` sweep (no `message_nid` argument) now only covers
   messages reachable through `folders()`/`messages()`, matching what `search` and
   `list_folders` already see; it no longer separately walks associated-content
   (FAI) items such as rules, forms and views.
+- The four non-DuckDB MCP tools (`store_info`, `get_message`, `list_attachments`,
+  `read_attachment`) now build their replies through plain functions shared with
+  the equivalent CLI flags, so the two transports cannot drift apart.
 
 ### Security
 - A Mac profile's `PathToDataFile` value (from `Outlook.sqlite`) is now checked for

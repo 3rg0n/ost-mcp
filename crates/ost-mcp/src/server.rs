@@ -6,6 +6,12 @@
 //! attachment payload is a single-message read that SQL would only get in
 //! the way of.
 //!
+//! Those four are plain functions (the "reports" section below) rather than
+//! methods on the server, so the CLI flags in `main` produce byte-for-byte
+//! the same JSON as the MCP tool of the same name — one shape, two
+//! transports, and a reply that only one of them can emit is a reply that
+//! drifts.
+//!
 //! Tool bodies are synchronous. They run on the multi-threaded runtime rather
 //! than under `spawn_blocking`: a stdio server has one client, so a slow sweep
 //! has nothing to compete with, and stdin stays readable on another worker.
@@ -53,6 +59,7 @@ fn bad_request(e: impl std::fmt::Display) -> ErrorData {
     ErrorData::invalid_params(e.to_string(), None)
 }
 
+/// A missing node is the caller's mistake, not the server's.
 fn not_found_or_internal(e: mailbox::Error) -> ErrorData {
     match e {
         mailbox::Error::NotFound(msg) => bad_request(msg),
@@ -220,6 +227,141 @@ pub struct AttachmentDataReply {
     pub base64: Option<String>,
 }
 
+// -------------------------------------------------------------------- reports
+//
+// Plain functions rather than methods on the server, so the CLI flags in
+// `main` produce byte-for-byte the same JSON as the MCP tool of the same
+// name — see the module doc.
+
+pub fn store_info(store: &MailboxRef, path: &str) -> Result<StoreInfo, mailbox::Error> {
+    Ok(StoreInfo {
+        path: path.to_string(),
+        display_name: store.display_name(),
+        kind: store.kind().to_string(),
+        folders: store.folders()?.len(),
+        tables: vec![
+            "folders(nid, parent_nid, name, path, item_count, unread_count, has_subfolders, is_search_folder)".into(),
+            "messages(nid, folder_nid, folder_path, subject, sender_name, sender_email, delivered, submitted, modified, size, unread, has_attachments, message_class)".into(),
+            "ost_attachments(message_nid => <nid>) -> (message_nid, nid, filename, mime, content_id, declared_size, data_len)".into(),
+        ],
+    })
+}
+
+pub fn message_report(
+    store: &MailboxRef,
+    nid: i64,
+    max_body_chars: Option<usize>,
+) -> Result<MessageReply, mailbox::Error> {
+    let m = store.message(nid)?;
+
+    let mut available = Vec::new();
+    if m.body_plain.is_some() {
+        available.push("plain".to_string());
+    }
+    if m.body_html.is_some() {
+        available.push("html".to_string());
+    }
+    if m.body_rtf.is_some() {
+        available.push("rtf".to_string());
+    }
+    // Prefer plain text: it is what a model can read without markup, and an
+    // HTML body is usually the same message.
+    let (body_format, full_body) = match (m.body_plain, m.body_html, m.body_rtf) {
+        (Some(p), _, _) => (Some("plain"), Some(p)),
+        (None, Some(h), _) => (Some("html"), Some(h)),
+        (None, None, Some(r)) => (Some("rtf"), Some(r)),
+        _ => (None, None),
+    };
+    let cap = max_body_chars.unwrap_or(DEFAULT_BODY_CHARS);
+    let mut truncated = false;
+    let body = full_body.map(|b| {
+        if b.chars().count() > cap {
+            truncated = true;
+            b.chars().take(cap).collect()
+        } else {
+            b
+        }
+    });
+
+    Ok(MessageReply {
+        nid: m.id,
+        subject: m.subject,
+        sender_name: m.sender_name,
+        sender_email: m.sender_email,
+        to: m.display_to,
+        cc: m.display_cc,
+        delivered: m.delivered_us.map(format_time_us),
+        submitted: m.submitted_us.map(format_time_us),
+        modified: m.modified_us.map(format_time_us),
+        size: m.size,
+        unread: m.unread,
+        message_class: m.message_class,
+        internet_message_id: m.internet_message_id,
+        conversation_topic: m.conversation_topic,
+        body,
+        body_format: body_format.map(str::to_string),
+        body_truncated: truncated,
+        bodies_available: available,
+        recipients: m
+            .recipients
+            .into_iter()
+            .map(|r| RecipientReply {
+                kind: match r.kind {
+                    Some(1) => "to".to_string(),
+                    Some(2) => "cc".to_string(),
+                    Some(3) => "bcc".to_string(),
+                    other => format!("{other:?}"),
+                },
+                name: r.name,
+                email: r.email,
+            })
+            .collect(),
+        attachments: m.attachments.into_iter().map(attachment_reply).collect(),
+    })
+}
+
+pub fn attachment_list(store: &MailboxRef, nid: i64) -> Result<Vec<AttachmentReply>, mailbox::Error> {
+    Ok(store.attachments(nid)?.into_iter().map(attachment_reply).collect())
+}
+
+pub fn attachment_data(
+    store: &MailboxRef,
+    message_nid: i64,
+    attachment_nid: i64,
+    max_bytes: Option<usize>,
+) -> Result<AttachmentDataReply, mailbox::Error> {
+    let meta = store
+        .attachments(message_nid)?
+        .into_iter()
+        .find(|a| a.id == attachment_nid);
+    let bytes = store.attachment_bytes(message_nid, attachment_nid)?;
+
+    let cap = max_bytes.unwrap_or(DEFAULT_ATTACH_BYTES);
+    let total = bytes.len();
+    let truncated = total > cap;
+    let slice = &bytes[..total.min(cap)];
+    // Truncation can split a multi-byte character, so a cut payload is only
+    // reported as text when the cut lands on a boundary.
+    let (text, b64) = match std::str::from_utf8(slice) {
+        Ok(s) if !s.contains('\0') => (Some(s.to_string()), None),
+        _ => (
+            None,
+            Some(base64::engine::general_purpose::STANDARD.encode(slice)),
+        ),
+    };
+    Ok(AttachmentDataReply {
+        message_nid,
+        attachment_nid,
+        filename: meta.as_ref().and_then(|m| m.filename.clone()),
+        mime: meta.as_ref().and_then(|m| m.mime.clone()),
+        total_bytes: total,
+        returned_bytes: slice.len(),
+        truncated,
+        text,
+        base64: b64,
+    })
+}
+
 // --------------------------------------------------------------------- server
 
 #[tool_router]
@@ -243,18 +385,7 @@ impl OstServer {
     /// What is mounted: the path, the backend and the queryable tables.
     #[tool(description = "Describe the mounted Outlook store: path, backend kind, folder count and the tables available to `sql`.")]
     async fn store_info(&self) -> Result<Json<StoreInfo>, ErrorData> {
-        let folders = self.store.folders().map_err(internal)?.len();
-        Ok(Json(StoreInfo {
-            path: self.path.clone(),
-            display_name: self.store.display_name(),
-            kind: self.store.kind().to_string(),
-            folders,
-            tables: vec![
-                "folders(nid, parent_nid, name, path, item_count, unread_count, has_subfolders, is_search_folder)".into(),
-                "messages(nid, folder_nid, folder_path, subject, sender_name, sender_email, delivered, submitted, modified, size, unread, has_attachments, message_class)".into(),
-                "ost_attachments(message_nid => <nid>) -> (message_nid, nid, filename, mime, content_id, declared_size, data_len)".into(),
-            ],
-        }))
+        Ok(Json(store_info(&self.store, &self.path).map_err(internal)?))
     }
 
     /// The folder tree. Cheap enough to return whole.
@@ -335,72 +466,9 @@ impl OstServer {
         &self,
         Parameters(req): Parameters<MessageRequest>,
     ) -> Result<Json<MessageReply>, ErrorData> {
-        let m = self.store.message(req.nid).map_err(not_found_or_internal)?;
-
-        let mut available = Vec::new();
-        if m.body_plain.is_some() {
-            available.push("plain".to_string());
-        }
-        if m.body_html.is_some() {
-            available.push("html".to_string());
-        }
-        if m.body_rtf.is_some() {
-            available.push("rtf".to_string());
-        }
-        // Prefer plain text: it is what a model can read without markup, and an
-        // HTML body is usually the same message.
-        let (body_format, full_body) = match (m.body_plain, m.body_html, m.body_rtf) {
-            (Some(p), _, _) => (Some("plain"), Some(p)),
-            (None, Some(h), _) => (Some("html"), Some(h)),
-            (None, None, Some(r)) => (Some("rtf"), Some(r)),
-            _ => (None, None),
-        };
-        let cap = req.max_body_chars.unwrap_or(DEFAULT_BODY_CHARS);
-        let mut truncated = false;
-        let body = full_body.map(|b| {
-            if b.chars().count() > cap {
-                truncated = true;
-                b.chars().take(cap).collect()
-            } else {
-                b
-            }
-        });
-
-        Ok(Json(MessageReply {
-            nid: m.id,
-            subject: m.subject,
-            sender_name: m.sender_name,
-            sender_email: m.sender_email,
-            to: m.display_to,
-            cc: m.display_cc,
-            delivered: m.delivered_us.map(format_time_us),
-            submitted: m.submitted_us.map(format_time_us),
-            modified: m.modified_us.map(format_time_us),
-            size: m.size,
-            unread: m.unread,
-            message_class: m.message_class,
-            internet_message_id: m.internet_message_id,
-            conversation_topic: m.conversation_topic,
-            body,
-            body_format: body_format.map(str::to_string),
-            body_truncated: truncated,
-            bodies_available: available,
-            recipients: m
-                .recipients
-                .into_iter()
-                .map(|r| RecipientReply {
-                    kind: match r.kind {
-                        Some(1) => "to".to_string(),
-                        Some(2) => "cc".to_string(),
-                        Some(3) => "bcc".to_string(),
-                        other => format!("{other:?}"),
-                    },
-                    name: r.name,
-                    email: r.email,
-                })
-                .collect(),
-            attachments: m.attachments.into_iter().map(attachment_reply).collect(),
-        }))
+        Ok(Json(
+            message_report(&self.store, req.nid, req.max_body_chars).map_err(not_found_or_internal)?,
+        ))
     }
 
     /// Attachment metadata for one message, without reading any payload.
@@ -409,8 +477,7 @@ impl OstServer {
         &self,
         Parameters(req): Parameters<NidRequest>,
     ) -> Result<Json<Vec<AttachmentReply>>, ErrorData> {
-        let atts = self.store.attachments(req.nid).map_err(not_found_or_internal)?;
-        Ok(Json(atts.into_iter().map(attachment_reply).collect()))
+        Ok(Json(attachment_list(&self.store, req.nid).map_err(not_found_or_internal)?))
     }
 
     /// One attachment's bytes, as text when they are text.
@@ -419,41 +486,10 @@ impl OstServer {
         &self,
         Parameters(req): Parameters<AttachmentRequest>,
     ) -> Result<Json<AttachmentDataReply>, ErrorData> {
-        let meta = self
-            .store
-            .attachments(req.message_nid)
-            .map_err(internal)?
-            .into_iter()
-            .find(|a| a.id == req.attachment_nid);
-        let bytes = self
-            .store
-            .attachment_bytes(req.message_nid, req.attachment_nid)
-            .map_err(not_found_or_internal)?;
-
-        let cap = req.max_bytes.unwrap_or(DEFAULT_ATTACH_BYTES);
-        let total = bytes.len();
-        let truncated = total > cap;
-        let slice = &bytes[..total.min(cap)];
-        // Truncation can split a multi-byte character, so a cut payload is only
-        // reported as text when the cut lands on a boundary.
-        let (text, b64) = match std::str::from_utf8(slice) {
-            Ok(s) if !s.contains('\0') => (Some(s.to_string()), None),
-            _ => (
-                None,
-                Some(base64::engine::general_purpose::STANDARD.encode(slice)),
-            ),
-        };
-        Ok(Json(AttachmentDataReply {
-            message_nid: req.message_nid,
-            attachment_nid: req.attachment_nid,
-            filename: meta.as_ref().and_then(|m| m.filename.clone()),
-            mime: meta.as_ref().and_then(|m| m.mime.clone()),
-            total_bytes: total,
-            returned_bytes: slice.len(),
-            truncated,
-            text,
-            base64: b64,
-        }))
+        Ok(Json(
+            attachment_data(&self.store, req.message_nid, req.attachment_nid, req.max_bytes)
+                .map_err(not_found_or_internal)?,
+        ))
     }
 }
 
