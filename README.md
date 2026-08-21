@@ -25,7 +25,7 @@ reads a Parquet file rather than loading it.
 
 ## Install
 
-One line, in PowerShell:
+**Windows**, one line, in PowerShell:
 
 ```powershell
 irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1 | iex
@@ -79,19 +79,20 @@ Install ost-mcp on this Windows machine and confirm it works.
 
 4. Check all three, and report the actual output of each:
    - `ost-mcp --list` names at least one .ost or .pst
-   - `ost-mcp --info` prints a format version and a folder count
+   - `ost-mcp --info` prints a backend kind and a folder count
    - the file ~/.claude/skills/ost-mcp/SKILL.md exists
 
 5. Then tell me to restart my Claude Code session so the skill loads.
 
 This tool reads my real mailbox, read-only. While you check the install, do not
 print, quote or save a subject line, a sender address or any message body. Counts,
-the format version and the file size are the only evidence you need.
+the backend kind and the folder count are the only evidence you need.
 ```
 
-### From source
+### From source (macOS, Linux, or Windows without the installer)
 
-Needs a Rust toolchain and, on Windows, the MSVC build tools.
+**macOS is source-only for now** — there is no installer script yet, only
+`cargo`. Needs a Rust toolchain and, on Windows, the MSVC build tools.
 
 ```sh
 cargo build --release
