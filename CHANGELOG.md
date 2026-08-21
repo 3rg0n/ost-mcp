@@ -31,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already covered folder listing and search.
 - `--attachment <msg>:<att> --out <path>` writes an attachment's bytes to a file,
   which base64 through a terminal cannot usefully do.
+- `install.ps1` installs the binary and the skill from one `irm ... | iex` line. It
+  checks for the Rust toolchain and the MSVC build tools first, names the winget
+  command for whichever is missing, and finishes by opening the store and running a
+  query rather than claiming success. The README carries a prompt that hands the
+  whole job to an agent.
 
 ### Changed
 - Every backend now implements a shared `Mailbox` trait instead of `ost-mcp` calling

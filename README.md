@@ -25,8 +25,73 @@ reads a Parquet file rather than loading it.
 
 ## Install
 
-Needs a Rust toolchain and, on Windows, the MSVC build tools. The first build
-compiles DuckDB, so expect a few minutes.
+One line, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1 | iex
+```
+
+That checks for a Rust toolchain and the MSVC build tools, activates the x64
+toolchain so the linker and the CRT come from one Visual Studio install, builds the
+binary with `cargo install`, drops the skill in `~/.claude/skills/ost-mcp`, then
+opens your store and runs a query to show it works. The first build compiles DuckDB,
+so allow a few minutes.
+
+Read it before you run it. Piping a remote script into a shell is a decision, not a
+default:
+
+```powershell
+irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1 | more
+```
+
+Options need a scriptblock rather than a pipe:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1))) -InstallPrereqs
+```
+
+| Option | What it does |
+|---|---|
+| `-InstallPrereqs` | Installs a missing Rust toolchain or MSVC build tools with winget |
+| `-SkillScope project` | Puts the skill in `.claude/skills` of `-ProjectPath` instead of your profile |
+| `-SkipSkill` | Binary only |
+| `-Force` | Reinstalls even when the same version is present, and ignores the MSVC check |
+| `-Ref <branch>` | Installs from a branch other than `main` |
+
+### Let an agent install it
+
+Copy this to Claude Code, or any agent that can run PowerShell. It runs the
+installer, fixes what fails, and checks the result.
+
+```text
+Install ost-mcp on this Windows machine and confirm it works.
+
+1. Run this in PowerShell:
+   irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1 | iex
+
+2. If it stops on a missing prerequisite, install what it names and run it again.
+   To let it install the Rust toolchain and the MSVC build tools itself, run:
+   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1))) -InstallPrereqs
+
+3. If the build fails with LNK1104 on a library such as msvcrt.lib, cargo picked
+   the wrong linker. Re-run from a Developer PowerShell for VS 2022, or run
+   vcvars64.bat first, so link.exe and the CRT come from one toolchain.
+
+4. Check all three, and report the actual output of each:
+   - `ost-mcp --list` names at least one .ost or .pst
+   - `ost-mcp --info` prints a format version and a folder count
+   - the file ~/.claude/skills/ost-mcp/SKILL.md exists
+
+5. Then tell me to restart my Claude Code session so the skill loads.
+
+This tool reads my real mailbox, read-only. While you check the install, do not
+print, quote or save a subject line, a sender address or any message body. Counts,
+the format version and the file size are the only evidence you need.
+```
+
+### From source
+
+Needs a Rust toolchain and, on Windows, the MSVC build tools.
 
 ```sh
 cargo build --release
@@ -67,8 +132,8 @@ $ ost-mcp --sql "SELECT folder_path, count(*) FROM messages GROUP BY 1 ORDER BY 
 
 ### As a Claude Code skill
 
-Lower friction than an MCP server: no config file to edit and no restart. Put the
-binary on `PATH` and copy the bundled skill into place.
+Lower friction than an MCP server: no config file to edit and no restart. The
+installer above does this for you; from a clone it is two commands.
 
 ```sh
 cargo install --path crates/ost-mcp
