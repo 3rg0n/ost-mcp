@@ -26,6 +26,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own (`docs/mac-outlook-format.md`).
 - A bundled Claude Code skill (`skills/ost-mcp/SKILL.md`) drives the binary from the
   shell, so a model can query the mailbox without an MCP server registration.
+- A `release` workflow builds `ost-mcp` for Windows x64 and macOS arm64 on a pushed
+  `v*` tag and attaches each binary to the release with its SHA-256, so neither
+  installer needs a compiler. The Windows binary links the CRT statically, which
+  also removes its Visual C++ redistributable dependency: `dumpbin /dependents` on
+  it names only system DLLs.
+- Both installers now download that binary, check it against the published hash, and
+  fall back to a source build when no asset matches the platform — an Intel Mac, a
+  Windows ARM64 machine, a `--ref` other than `main`, or a release that has no asset
+  yet. A hash mismatch is a hard failure, not a reason to fall back.
+- `ost-mcp --version` prints the version and exits, so a downloaded binary can say
+  what it is and each installer can report what it just put on PATH.
 - `install.sh` installs the binary and the skill on macOS from one
   `curl ... | bash` line, mirroring `install.ps1`. It checks for Xcode Command
   Line Tools and a Rust toolchain first, and finishes by mounting the real

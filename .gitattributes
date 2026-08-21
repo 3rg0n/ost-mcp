@@ -1,0 +1,4 @@
+# install.sh is piped straight into bash from a URL. A CRLF checkout on a
+# Windows clone, committed back, would make every line end in \r and the script
+# would fail on its own shebang. Pin it, whatever core.autocrlf says locally.
+*.sh text eol=lf

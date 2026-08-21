@@ -92,6 +92,12 @@ fn main() -> Result<(), Fail> {
                 eprintln!("{HELP}");
                 return Ok(());
             }
+            // A binary downloaded from a release has no other way to say what
+            // it is, and the installer reports what it just put on PATH.
+            "-V" | "--version" => {
+                println!("ost-mcp {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
             other if other.starts_with('-') => return Err(format!("unknown flag {other}").into()),
             other => path = Some(other.to_string()),
         }
@@ -197,6 +203,7 @@ ost-mcp — query an Outlook mailbox in place
   ost-mcp [<store>] --attachments <nid>   attachment metadata for a message
   ost-mcp [<store>] --attachment <m>:<a>  one attachment payload
   ost-mcp --list                          list the stores that were discovered
+  ost-mcp --version                       print the version and exit
 
 Options:
   --limit <n>             max rows for --sql (default 10000)

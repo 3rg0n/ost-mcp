@@ -1,0 +1,121 @@
+name: release
+
+# Attaches a prebuilt binary to a GitHub release, so `install.ps1` and
+# `install.sh` can download one file instead of compiling the DuckDB
+# amalgamation on the user's machine. That is what makes a Rust toolchain and,
+# on Windows, an MSVC install optional rather than mandatory.
+#
+# Push a tag to run it. `workflow_dispatch` rebuilds the assets for a tag that
+# already exists.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build and attach assets to (it must already exist)
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - id: tag
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      # A dispatch with a typo would otherwise make `gh release create` tag the
+      # default branch, publishing a release for a commit nobody chose.
+      - name: Check the tag exists
+        run: git rev-parse --verify "refs/tags/${{ steps.tag.outputs.tag }}"
+
+      - name: Create the release if it is not there yet
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag='${{ steps.tag.outputs.tag }}'
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "release $tag already exists; the build jobs will replace its assets"
+          else
+            gh release create "$tag" --title "$tag" --generate-notes
+          fi
+
+  build:
+    needs: release
+    strategy:
+      # One platform failing should still publish the other's binary; the
+      # installers fall back to a source build wherever an asset is missing.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            # A static CRT drops the last runtime dependency. Without it the
+            # binary needs MSVCP140.dll and VCRUNTIME140.dll from the Visual
+            # C++ redistributable, which is exactly the install this job is
+            # meant to make unnecessary.
+            rustflags: -C target-feature=+crt-static
+          # macOS is arm64 only. An Intel Mac falls back to a source build,
+          # which install.sh already handles; cross-compiling DuckDB's C++ to
+          # x86_64 here is untested and a broken asset is worse than none.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            rustflags: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+
+      - name: Install the Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+        run: cargo build -p ost-mcp --release --locked --target ${{ matrix.target }}
+
+      # Cheap proof the artifact runs at all on the platform it was built for.
+      # A binary that cannot start is the one failure a checksum cannot catch.
+      - name: Check the binary runs
+        run: ./target/${{ matrix.target }}/release/ost-mcp --version
+        shell: bash
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = 'ost-mcp-${{ matrix.target }}'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path 'target/${{ matrix.target }}/release/ost-mcp.exe' -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$name.zip").Hash.ToLower()
+          Set-Content -Path "dist/$name.zip.sha256" -Value $hash -NoNewline
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          name='ost-mcp-${{ matrix.target }}'
+          mkdir -p dist
+          tar -czf "dist/$name.tar.gz" -C 'target/${{ matrix.target }}/release' ost-mcp
+          shasum -a 256 "dist/$name.tar.gz" | cut -d ' ' -f 1 | tr -d '\n' > "dist/$name.tar.gz.sha256"
+
+      # bash, not the platform default: PowerShell passes `dist/*` to a native
+      # command literally, and gh does not expand a glob itself.
+      - name: Attach to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload '${{ needs.release.outputs.tag }}' dist/* --clobber

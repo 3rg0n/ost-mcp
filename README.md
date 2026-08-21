@@ -31,11 +31,11 @@ reads a Parquet file rather than loading it.
 irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1 | iex
 ```
 
-That checks for a Rust toolchain and the MSVC build tools, activates the x64
-toolchain so the linker and the CRT come from one Visual Studio install, builds the
-binary with `cargo install`, drops the skill in `~/.claude/skills/ost-mcp`, then
-opens your store and runs a query to show it works. The first build compiles DuckDB,
-so allow a few minutes.
+That downloads the prebuilt binary from the latest release, checks it against its
+published SHA-256, adds it to your PATH, drops the skill in
+`~/.claude/skills/ost-mcp`, then opens your store and runs a query to show it works.
+The Windows binary links the CRT statically, so **nothing else needs installing** —
+no Rust, no MSVC, no Visual C++ redistributable.
 
 Read it before you run it. Piping a remote script into a shell is a decision, not a
 default:
@@ -47,16 +47,18 @@ irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1 | more
 Options need a scriptblock rather than a pipe:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1))) -InstallPrereqs
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1))) -FromSource
 ```
 
 | Option | What it does |
 |---|---|
-| `-InstallPrereqs` | Installs a missing Rust toolchain or MSVC build tools with winget |
+| `-FromSource` | Builds with cargo instead of downloading. Needs Rust and the MSVC build tools |
+| `-InstallPrereqs` | Installs a missing Rust toolchain or MSVC build tools with winget, for a source build |
+| `-ReleaseTag <tag>` | Downloads a specific release instead of `latest` |
 | `-SkillScope project` | Puts the skill in `.claude/skills` of `-ProjectPath` instead of your profile |
 | `-SkipSkill` | Binary only |
 | `-Force` | Reinstalls even when the same version is present, and ignores the MSVC check |
-| `-Ref <branch>` | Installs from a branch other than `main` |
+| `-Ref <branch>` | Builds from a branch other than `main`, which implies `-FromSource` |
 
 **macOS**, one line, in Terminal:
 
@@ -64,25 +66,30 @@ Options need a scriptblock rather than a pipe:
 curl -fsSL https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.sh | bash
 ```
 
-That checks for Xcode Command Line Tools and a Rust toolchain, builds the binary
-with `cargo install`, drops the skill in `~/.claude/skills/ost-mcp`, then mounts
-your Outlook profile and runs a query to show it works.
+That does the same thing: downloads the prebuilt binary, checks its SHA-256, puts it
+in `~/.local/bin`, drops the skill in `~/.claude/skills/ost-mcp`, then mounts your
+Outlook profile and runs a query to show it works.
 
 Read it first the same way — `curl -fsSL <url> | less`. Options go after `-s --`:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.sh | bash -s -- --install-prereqs
+curl -fsSL https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.sh | bash -s -- --from-source
 ```
 
 | Option | What it does |
 |---|---|
-| `--install-prereqs` | Installs a missing Rust toolchain with rustup, and prompts for Xcode Command Line Tools |
+| `--from-source` | Builds with cargo instead of downloading. Needs Rust and Xcode Command Line Tools |
+| `--install-prereqs` | Installs a missing Rust toolchain with rustup, and prompts for Xcode Command Line Tools, for a source build |
+| `--release-tag <tag>` | Downloads a specific release instead of `latest` |
 | `--skill-scope project` | Puts the skill in `.claude/skills` of `--project-path` instead of your home directory |
 | `--skip-skill` | Binary only |
 | `--force` | Reinstalls even when the same version is present, and continues past the Command Line Tools check |
-| `--ref <branch>` | Installs from a branch other than `main` |
+| `--ref <branch>` | Builds from a branch other than `main`, which implies `--from-source` |
 
-There is no Linux build. Outlook does not run on Linux, so there is no store to read.
+The published binaries are **Windows x64** and **macOS arm64**. On an Intel Mac, or
+whenever a release asset is missing, both installers fall back to a source build on
+their own — that path needs a toolchain and a few minutes to compile DuckDB. There is
+no Linux build: Outlook does not run on Linux, so there is no store to read.
 
 ### Let an agent install it
 
@@ -98,16 +105,20 @@ Install ost-mcp on this machine and confirm it works.
    macOS, in a shell:
      curl -fsSL https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.sh | bash
 
-2. If it stops on a missing prerequisite, install what it names and run it again.
-   To let it install the toolchain itself, add the flag for this platform:
+2. It downloads a prebuilt binary, so it normally needs no compiler. If it falls
+   back to a source build and then stops on a missing prerequisite, install what it
+   names and run it again. To let it install the toolchain itself, add the flag for
+   this platform:
      & ([scriptblock]::Create((irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1))) -InstallPrereqs
      curl -fsSL https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.sh | bash -s -- --install-prereqs
 
-3. On Windows, if the build fails with LNK1104 on a library such as msvcrt.lib,
-   cargo picked the wrong linker. Re-run from a Developer PowerShell for VS 2022,
-   so link.exe and the CRT come from one toolchain.
+3. Two failures worth knowing, both only on the source-build path. On Windows,
+   LNK1104 on a library such as msvcrt.lib means cargo picked the wrong linker —
+   re-run from a Developer PowerShell for VS 2022. If instead the download reports
+   a SHA-256 mismatch, stop and tell me; do not work around it.
 
-4. Check all three, and report the actual output of each:
+4. Check all four, and report the actual output of each:
+   - `ost-mcp --version` prints a version
    - `ost-mcp --list` names at least one store
    - `ost-mcp --info` prints a backend kind and a folder count
    - the file ~/.claude/skills/ost-mcp/SKILL.md exists
@@ -144,6 +155,7 @@ ost-mcp [store] --message <nid>        # one message: headers, recipients, body
 ost-mcp [store] --attachments <nid>    # attachment metadata for a message
 ost-mcp [store] --attachment <m>:<a>   # one payload, as text or base64
 ost-mcp [store] --attachment <m>:<a> --out f   # write the payload to a file
+ost-mcp --version                      # which build this is
 ```
 
 Every MCP tool has a flag that prints the same JSON and exits, so the binary is

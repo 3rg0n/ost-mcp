@@ -3,18 +3,32 @@
     Installs ost-mcp: the binary on PATH and the Claude Code skill beside it.
 
 .DESCRIPTION
-    Builds and installs the `ost-mcp` binary with cargo, then drops
-    `skills/ost-mcp/SKILL.md` into the Claude skills directory so a model can
-    query the mailbox without registering an MCP server.
+    Downloads the prebuilt `ost-mcp` binary from a GitHub release, checks it
+    against its published SHA-256, then drops `skills/ost-mcp/SKILL.md` into the
+    Claude skills directory so a model can query the mailbox without registering
+    an MCP server.
 
-    The first build compiles the DuckDB amalgamation, which takes a few minutes
-    and is the slowest part by far.
+    The prebuilt Windows binary links the CRT statically, so it needs no Rust
+    toolchain, no MSVC install and no Visual C++ redistributable.
+
+    When no release asset matches this machine, or when -FromSource or a -Ref
+    other than `main` is given, the script builds with cargo instead. That path
+    does need Rust and the MSVC build tools, and it compiles the DuckDB
+    amalgamation, which takes a few minutes.
 
     Nothing here touches a mailbox. The reader maps a store read-only and has no
     code path that writes to one.
 
+.PARAMETER ReleaseTag
+    Which release to download from. Defaults to `latest`.
+
+.PARAMETER FromSource
+    Build with cargo instead of downloading a release binary.
+
 .PARAMETER Ref
-    Branch to install from. Defaults to `main`.
+    Branch to build from when building from source. Defaults to `main`, and any
+    other value implies -FromSource. Also selects which branch the skill comes
+    from.
 
 .PARAMETER SkillScope
     `user` installs the skill for every session (~/.claude/skills). `project`
@@ -25,9 +39,9 @@
     Where a `project` scoped skill goes. Defaults to the current directory.
 
 .PARAMETER InstallPrereqs
-    Install a missing Rust toolchain or MSVC build tools with winget. Off by
-    default: installing a compiler is not something a one-line command should do
-    without being asked.
+    Install a missing Rust toolchain or MSVC build tools with winget. Only the
+    source build needs either. Off by default: installing a compiler is not
+    something a one-line command should do without being asked.
 
 .PARAMETER Force
     Reinstall the binary even when the same version is already present, and
@@ -40,10 +54,12 @@
     irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1 | iex
 
 .EXAMPLE
-    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1))) -InstallPrereqs -Force
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/3rg0n/ost-mcp/main/install.ps1))) -FromSource -InstallPrereqs
 #>
 [CmdletBinding()]
 param(
+    [string]$ReleaseTag = 'latest',
+    [switch]$FromSource,
     [string]$Ref = 'main',
     [ValidateSet('user', 'project')]
     [string]$SkillScope = 'user',
@@ -64,6 +80,19 @@ function Write-Step { param([string]$Text) Write-Host "==> $Text" -ForegroundCol
 function Write-Ok { param([string]$Text) Write-Host "    ok  $Text" -ForegroundColor Green }
 function Write-Note { param([string]$Text) Write-Host "    --  $Text" -ForegroundColor DarkGray }
 function Write-Warn { param([string]$Text) Write-Host "    !!  $Text" -ForegroundColor Yellow }
+
+function Fail {
+    param([string]$Text, [string[]]$Remedy)
+    Write-Host ""
+    Write-Host "ost-mcp install failed: $Text" -ForegroundColor Red
+    if ($Remedy) {
+        Write-Host ""
+        Write-Host "To fix it:" -ForegroundColor Red
+        foreach ($line in $Remedy) { Write-Host "  $line" }
+    }
+    Write-Host ""
+    throw $Text
+}
 
 function Import-VcVars {
     <#
@@ -95,17 +124,38 @@ function Import-VcVars {
     }
 }
 
-function Fail {
-    param([string]$Text, [string[]]$Remedy)
-    Write-Host ""
-    Write-Host "ost-mcp install failed: $Text" -ForegroundColor Red
-    if ($Remedy) {
-        Write-Host ""
-        Write-Host "To fix it:" -ForegroundColor Red
-        foreach ($line in $Remedy) { Write-Host "  $line" }
+function Add-ToUserPath {
+    <#
+        Appends a directory to the user's PATH, in the registry and in this
+        process. Returns $true when it changed something.
+
+        Not [Environment]::SetEnvironmentVariable: reading PATH through that API
+        expands %USERPROFILE% and anything else the value references, and writing
+        the expanded string back would freeze another program's variable
+        references into literal paths. The registry API can read the raw value
+        and preserve the value kind.
+    #>
+    param([string]$Directory)
+
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+    try {
+        $raw = [string]$key.GetValue(
+            'PATH', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+        if ($raw) { $kind = $key.GetValueKind('PATH') }
+
+        $parts = @($raw -split ';' | Where-Object { $_ -ne '' })
+        if ($parts -contains $Directory) { return $false }
+
+        $value = $Directory
+        if ($raw) { $value = "$raw;$Directory" }
+        $key.SetValue('PATH', $value, $kind)
+    } finally {
+        if ($key) { $key.Close() }
     }
-    Write-Host ""
-    throw $Text
+
+    $env:PATH = "$env:PATH;$Directory"
+    return $true
 }
 
 # ------------------------------------------------------------- preflight
@@ -129,120 +179,265 @@ try {
     Write-Note "could not raise the TLS version; a download may fail"
 }
 
-# Rust. Respect CARGO_HOME, because it is not always under the profile.
+# Where the binary goes. cargo's bin directory when it exists, so a machine that
+# already has a source install gets an upgrade in place rather than a second
+# copy on PATH; a dedicated directory otherwise.
 $cargoHome = $env:CARGO_HOME
 if (-not $cargoHome) { $cargoHome = Join-Path $env:USERPROFILE '.cargo' }
 $cargoBin = Join-Path $cargoHome 'bin'
 
-$cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
-if (-not $cargo) {
-    $candidate = Join-Path $cargoBin 'cargo.exe'
-    if (Test-Path $candidate) {
-        $cargo = $candidate
-        $env:PATH = "$cargoBin;$env:PATH"
+$installDir = $cargoBin
+if (-not (Test-Path $cargoBin)) {
+    $installDir = Join-Path $env:LOCALAPPDATA 'Programs\ost-mcp'
+}
+$exe = Join-Path $installDir 'ost-mcp.exe'
+
+# Only the x64 asset is published. Windows on ARM can run it under emulation,
+# but a native build is worth the compile, so ARM64 goes to source.
+$arch = $env:PROCESSOR_ARCHITECTURE
+if (-not $arch) { $arch = 'AMD64' }
+$target = 'x86_64-pc-windows-msvc'
+
+# A branch other than main is a request for that branch's code, which a
+# published release asset is not.
+$useSource = [bool]$FromSource
+if ($Ref -ne 'main' -and -not $FromSource) {
+    Write-Note "-Ref $Ref given, so the binary is built from that branch rather than downloaded"
+    $useSource = $true
+}
+if ($arch -ne 'AMD64' -and -not $useSource) {
+    Write-Note "this is a $arch machine and only an x64 binary is published; building from source"
+    $useSource = $true
+}
+
+# ------------------------------------------------------- binary: download
+
+function Install-FromRelease {
+    <#
+        Downloads, checks and unpacks the release asset for this platform.
+        Returns $true on success, $false when the release or the asset is not
+        there — the caller then builds from source.
+
+        A failed download is a fallback. A checksum mismatch is not: it means
+        the bytes that arrived are not the bytes that were published, and
+        running them anyway would defeat the point of publishing the hash.
+    #>
+    param([string]$Destination)
+
+    $asset = "ost-mcp-$target.zip"
+    if ($ReleaseTag -eq 'latest') {
+        $base = "$RepoUrl/releases/latest/download"
+    } else {
+        $base = "$RepoUrl/releases/download/$ReleaseTag"
     }
-}
 
-if (-not $cargo -and $InstallPrereqs) {
-    Write-Step "Installing the Rust toolchain with winget"
-    winget install --id Rustlang.Rustup --accept-source-agreements --accept-package-agreements --disable-interactivity
-    $env:PATH = "$cargoBin;$env:PATH"
-    $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
-}
+    $tmp = Join-Path $env:TEMP "ost-mcp-install-$PID"
+    New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+    $zip = Join-Path $tmp $asset
 
-if (-not $cargo) {
-    Fail "no Rust toolchain found (cargo is not on PATH)." @(
-        "winget install --id Rustlang.Rustup",
-        "or download rustup-init.exe from https://rustup.rs",
-        "then re-run this installer in a new shell.",
-        "",
-        "Or re-run with -InstallPrereqs to let this script do it."
-    )
-}
-Write-Ok "cargo at $cargo"
-
-# MSVC. Building DuckDB needs a C++ toolchain and a linker.
-$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-$vcInstall = $null
-if (Test-Path $vswhere) {
-    $vcInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
-    if ($vcInstall) { Write-Ok "MSVC C++ tools at $vcInstall" }
-}
-if (-not $vcInstall) {
-    if ($InstallPrereqs) {
-        Write-Step "Installing MSVC build tools with winget (this is a large download)"
-        winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" --accept-source-agreements --accept-package-agreements --disable-interactivity
-        if (Test-Path $vswhere) {
-            $vcInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+    # Invoke-WebRequest's progress rendering costs more than the transfer on
+    # PowerShell 5.1.
+    $prevProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        try {
+            Invoke-WebRequest -Uri "$base/$asset" -OutFile $zip -UseBasicParsing
+            Invoke-WebRequest -Uri "$base/$asset.sha256" -OutFile "$zip.sha256" -UseBasicParsing
+        } catch {
+            Write-Warn "no release binary for this platform ($($_.Exception.Message))"
+            return $false
         }
-    } elseif (-not $Force) {
-        Fail "no MSVC C++ build tools found, and DuckDB will not compile without them." @(
-            "winget install --id Microsoft.VisualStudio.2022.BuildTools --override `"--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended`"",
+
+        $expected = (Get-Content "$zip.sha256" -Raw).Trim().ToLower()
+        $actual = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
+        if ($expected -ne $actual) {
+            Fail "the downloaded binary does not match its published SHA-256." @(
+                "expected $expected",
+                "got      $actual",
+                "",
+                "Do not run it. Something between you and GitHub changed the bytes.",
+                "Build from source instead: re-run with -FromSource"
+            )
+        }
+        Write-Ok "SHA-256 matches the published hash"
+
+        Expand-Archive -Path $zip -DestinationPath $tmp -Force
+        $unpacked = Join-Path $tmp 'ost-mcp.exe'
+        if (-not (Test-Path $unpacked)) {
+            Fail "$asset does not contain ost-mcp.exe." @(
+                "The release asset is malformed. Build from source: re-run with -FromSource"
+            )
+        }
+
+        New-Item -ItemType Directory -Force -Path (Split-Path $Destination) | Out-Null
+        try {
+            Copy-Item $unpacked $Destination -Force
+        } catch {
+            Fail "could not write $Destination -- $($_.Exception.Message)" @(
+                "A running ost-mcp holds the file open. Close any Claude Code session",
+                "with the MCP server attached, then re-run this installer."
+            )
+        }
+
+        # A checksum proves the bytes are the published ones, not that they run
+        # here. Anything that stops a downloaded binary from starting — a
+        # missing system library, a policy that blocks it — makes a source
+        # build the better answer, so treat it as a failed download.
+        $ran = ''
+        try { $ran = (& $Destination --version 2>$null | Select-Object -First 1) } catch { }
+        if (-not $ran) {
+            Write-Warn "the downloaded binary does not run on this machine"
+            return $false
+        }
+        return $true
+    } finally {
+        $ProgressPreference = $prevProgress
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+if (-not $useSource) {
+    Write-Step "Downloading the ost-mcp binary ($ReleaseTag release, $target)"
+    if (Install-FromRelease $exe) {
+        Write-Ok "installed $exe"
+    } else {
+        Write-Note "falling back to a source build"
+        $useSource = $true
+    }
+}
+
+# --------------------------------------------------------- binary: source
+
+if ($useSource) {
+    # Rust. Respect CARGO_HOME, because it is not always under the profile.
+    $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
+    if (-not $cargo) {
+        $candidate = Join-Path $cargoBin 'cargo.exe'
+        if (Test-Path $candidate) {
+            $cargo = $candidate
+            $env:PATH = "$cargoBin;$env:PATH"
+        }
+    }
+
+    if (-not $cargo -and $InstallPrereqs) {
+        Write-Step "Installing the Rust toolchain with winget"
+        winget install --id Rustlang.Rustup --accept-source-agreements --accept-package-agreements --disable-interactivity
+        $env:PATH = "$cargoBin;$env:PATH"
+        $cargo = (Get-Command cargo -ErrorAction SilentlyContinue).Source
+    }
+
+    if (-not $cargo) {
+        Fail "no Rust toolchain found (cargo is not on PATH), and this run needs a source build." @(
+            "winget install --id Rustlang.Rustup",
+            "or download rustup-init.exe from https://rustup.rs",
+            "then re-run this installer in a new shell.",
             "",
-            "Or re-run with -InstallPrereqs to let this script do it,",
-            "or with -Force to try the build anyway."
+            "Or re-run with -InstallPrereqs to let this script do it."
         )
-    } else {
-        Write-Warn "no MSVC detected; continuing because -Force was passed"
     }
-}
+    Write-Ok "cargo at $cargo"
 
-# ---------------------------------------------------------------- binary
-
-if ($vcInstall) {
-    $vcvars = Join-Path $vcInstall 'VC\Auxiliary\Build\vcvars64.bat'
-    if (Test-Path $vcvars) {
-        Import-VcVars $vcvars
-        Write-Ok "activated the x64 toolchain from $vcInstall"
-    } else {
-        Write-Warn "no vcvars64.bat under $vcInstall; letting rustc pick the linker"
+    # MSVC. Building DuckDB needs a C++ toolchain and a linker.
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    $vcInstall = $null
+    if (Test-Path $vswhere) {
+        $vcInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+        if ($vcInstall) { Write-Ok "MSVC C++ tools at $vcInstall" }
     }
+    if (-not $vcInstall) {
+        if ($InstallPrereqs) {
+            Write-Step "Installing MSVC build tools with winget (this is a large download)"
+            winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended" --accept-source-agreements --accept-package-agreements --disable-interactivity
+            if (Test-Path $vswhere) {
+                $vcInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+            }
+        } elseif (-not $Force) {
+            Fail "no MSVC C++ build tools found, and DuckDB will not compile without them." @(
+                "winget install --id Microsoft.VisualStudio.2022.BuildTools --override `"--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended`"",
+                "",
+                "Or re-run with -InstallPrereqs to let this script do it,",
+                "or with -Force to try the build anyway."
+            )
+        } else {
+            Write-Warn "no MSVC detected; continuing because -Force was passed"
+        }
+    }
+
+    if ($vcInstall) {
+        $vcvars = Join-Path $vcInstall 'VC\Auxiliary\Build\vcvars64.bat'
+        if (Test-Path $vcvars) {
+            Import-VcVars $vcvars
+            Write-Ok "activated the x64 toolchain from $vcInstall"
+        } else {
+            Write-Warn "no vcvars64.bat under $vcInstall; letting rustc pick the linker"
+        }
+    }
+
+    # cargo's own git client cannot read a Windows credential helper, so a private or
+    # enterprise fork fails to authenticate. The git CLI can, and is already installed
+    # for anything else here to work.
+    if (-not $env:CARGO_NET_GIT_FETCH_WITH_CLI -and (Get-Command git -ErrorAction SilentlyContinue)) {
+        $env:CARGO_NET_GIT_FETCH_WITH_CLI = 'true'
+    }
+
+    # A static CRT, matching the published binary, so a source install has no
+    # Visual C++ redistributable dependency either.
+    if (-not $env:RUSTFLAGS) { $env:RUSTFLAGS = '-C target-feature=+crt-static' }
+
+    Write-Step "Building the ost-mcp binary (the first build compiles DuckDB; allow a few minutes)"
+
+    $installArgs = @('install', '--git', $RepoUrl, '--branch', $Ref, '--locked', 'ost-mcp')
+    if ($Force) { $installArgs += '--force' }
+
+    # Stream cargo's output. An exit code on its own tells the user nothing, and the
+    # compiler error is the whole diagnosis.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    & $cargo @installArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
+    $cargoExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevEap
+
+    if ($cargoExit -ne 0) {
+        Fail "cargo install exited $cargoExit (the error is above)." @(
+            "LNK1104 on a library such as msvcrt.lib means the linker and the CRT came",
+            "from different Visual Studio installs. Open a Developer PowerShell for the",
+            "toolchain you want and re-run this installer there.",
+            "",
+            "A git authentication failure means the repository is not readable by this",
+            "machine. Authenticate to GitHub first, for example with: gh auth login"
+        )
+    }
+
+    # cargo installs where cargo wants to, whatever this script picked earlier.
+    $exe = Join-Path $cargoBin 'ost-mcp.exe'
+    if (-not (Test-Path $exe)) {
+        Fail "cargo reported success but $exe is missing." @(
+            "Check where cargo installs binaries: cargo install --list"
+        )
+    }
+    $installDir = $cargoBin
+    Write-Ok "installed $exe"
 }
 
-# cargo's own git client cannot read a Windows credential helper, so a private or
-# enterprise fork fails to authenticate. The git CLI can, and is already installed
-# for anything else here to work.
-if (-not $env:CARGO_NET_GIT_FETCH_WITH_CLI -and (Get-Command git -ErrorAction SilentlyContinue)) {
-    $env:CARGO_NET_GIT_FETCH_WITH_CLI = 'true'
-}
+$version = ''
+try { $version = (& $exe --version 2>$null | Select-Object -First 1) } catch { }
+if ($version) { Write-Ok $version }
 
-Write-Step "Installing the ost-mcp binary (the first build compiles DuckDB; allow a few minutes)"
+# ------------------------------------------------------------------ PATH
 
-$installArgs = @('install', '--git', $RepoUrl, '--branch', $Ref, '--locked', 'ost-mcp')
-if ($Force) { $installArgs += '--force' }
-
-# Stream cargo's output. An exit code on its own tells the user nothing, and the
-# compiler error is the whole diagnosis.
-$prevEap = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-& $cargo @installArgs 2>&1 | ForEach-Object { Write-Host "    $_" }
-$cargoExit = $LASTEXITCODE
-$ErrorActionPreference = $prevEap
-
-if ($cargoExit -ne 0) {
-    Fail "cargo install exited $cargoExit (the error is above)." @(
-        "LNK1104 on a library such as msvcrt.lib means the linker and the CRT came",
-        "from different Visual Studio installs. Open a Developer PowerShell for the",
-        "toolchain you want and re-run this installer there.",
-        "",
-        "A git authentication failure means the repository is not readable by this",
-        "machine. Authenticate to GitHub first, for example with: gh auth login"
-    )
-}
-
-$exe = Join-Path $cargoBin 'ost-mcp.exe'
-if (-not (Test-Path $exe)) {
-    Fail "cargo reported success but $exe is missing." @(
-        "Check where cargo installs binaries: cargo install --list"
-    )
-}
-Write-Ok "installed $exe"
-
-# cargo's bin directory is normally on PATH already; say so plainly when it is not.
-$userPath = [Environment]::GetEnvironmentVariable('PATH', 'User')
-if ($userPath -notlike "*$cargoBin*" -and $env:PATH -notlike "*$cargoBin*") {
-    Write-Warn "$cargoBin is not on your PATH. Add it, or the skill cannot find the binary:"
-    Write-Host "        [Environment]::SetEnvironmentVariable('PATH', `"`$env:PATH;$cargoBin`", 'User')"
+if ($env:PATH -notlike "*$installDir*") {
+    $added = $false
+    try {
+        $added = Add-ToUserPath $installDir
+    } catch {
+        Write-Warn "could not add $installDir to your PATH -- $($_.Exception.Message)"
+    }
+    if ($added) {
+        Write-Ok "added $installDir to your PATH (open a new shell to run ost-mcp by name)"
+    } else {
+        Write-Note "$installDir is already on your PATH in the registry"
+        $env:PATH = "$env:PATH;$installDir"
+    }
 }
 
 # ----------------------------------------------------------------- skill
