@@ -113,9 +113,9 @@ function Fail {
 Write-Step "Checking this machine"
 
 if ($env:OS -ne 'Windows_NT') {
-    Fail "ost-mcp is Windows only." @(
-        "Mac Outlook keeps no OST file. It uses Outlook.sqlite plus .olk15 files,",
-        "which needs a different reader: $RepoUrl/issues/1"
+    Fail "this installer is for Windows." @(
+        "On macOS, use install.sh instead:",
+        "curl -fsSL $RawBase/install.sh | sh"
     )
 }
 Write-Ok "Windows, PowerShell $($PSVersionTable.PSVersion)"
@@ -310,8 +310,7 @@ $mounted = $false
 try {
     $info = & $exe --info 2>$null | ConvertFrom-Json
     if ($info) {
-        $gb = [math]::Round($info.bytes / 1GB, 2)
-        Write-Ok "mounted format version $($info.version), $gb GB, $($info.folders) folders"
+        Write-Ok "mounted backend $($info.kind), $($info.folders) folders"
         $mounted = $true
     }
 } catch {

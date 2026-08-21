@@ -91,16 +91,17 @@ WHERE unread_count > 0 ORDER BY unread_count DESC
 
 Find a message, then read it:
 
-```powershell
+```sh
 ost-mcp --sql "SELECT nid, subject FROM messages WHERE subject ILIKE '%invoice%' ORDER BY delivered DESC LIMIT 10"
 ost-mcp --message 24295876
 ```
 
-Get a file off a message:
+Get a file off a message — use a temp path in whatever form the current shell
+expects (`$env:TEMP\report.pdf` in PowerShell, `/tmp/report.pdf` in bash/zsh):
 
-```powershell
+```sh
 ost-mcp --attachments 24295876
-ost-mcp --attachment 24295876:24277637 --out "$env:TEMP\report.pdf"
+ost-mcp --attachment 24295876:24277637 --out /tmp/report.pdf
 ```
 
 ## Rules

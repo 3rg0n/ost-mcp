@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own (`docs/mac-outlook-format.md`).
 - A bundled Claude Code skill (`skills/ost-mcp/SKILL.md`) drives the binary from the
   shell, so a model can query the mailbox without an MCP server registration.
+- `install.sh` installs the binary and the skill on macOS from one
+  `curl ... | bash` line, mirroring `install.ps1`. It checks for Xcode Command
+  Line Tools and a Rust toolchain first, and finishes by mounting the real
+  profile and running a query rather than claiming success.
 - Every MCP tool now has a command-line flag that prints the same JSON and exits:
   `--info`, `--message`, `--attachments` and `--attachment` join `--sql`, which
   already covered folder listing and search.
@@ -77,3 +81,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no longer reports the nearer (and sometimes wrong) one as the sender; it reports
   neither rather than guess. Found by using the tool to answer a real question and
   checking the answer against the message's own quoted text, not by review.
+- `install.ps1` and `skills/ost-mcp/SKILL.md` no longer refer to the removed
+  `StoreInfo.version`/`.bytes` fields; both now report the `kind` string that
+  replaced them.
